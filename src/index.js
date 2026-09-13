@@ -1073,7 +1073,11 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
     experimental: {
       clash_api: {
         external_controller: "127.0.0.1:9090",
-        secret: ""
+        external_ui: "ui",
+        external_ui_download_url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip",
+        external_ui_download_detour: "proxy",
+        secret: "",
+        default_mode: "Rule"
       },
       cache_file: {
         enabled: true,

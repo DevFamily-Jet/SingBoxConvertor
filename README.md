@@ -45,11 +45,15 @@
   - 自动测速目标采用 Google 官方全球边缘探测源 `http://www.gstatic.com/generate_204`，根除 Cloudflare 80 端口 HTTP 400 导致的“无延迟”假死误判。
   - 采用 `interrupt_exist_connections: false`，节点测速切换时维持现有活动长连接，绝不闪断。
 
-### 6. 广泛的协议与订阅格式兼容
+### 6. 内置 Metacubexd 现代化 Web 控制面板
+- **开箱即用 Web 仪表盘**：配置内置 `experimental.clash_api`，自动挂载最新一代 MetaCubeX 官方开源的 [Metacubexd](https://github.com/MetaCubeX/metacubexd) 仪表盘。
+- **直连控制**：客户端运行后，浏览器直接打开 `http://127.0.0.1:9090` 或 `http://127.0.0.1:9090/ui` 即可直接进入图形化控制中心，享受动态速率曲线、一键测速、节点无感切换与连接会话排查。
+
+### 7. 广泛的协议与订阅格式兼容
 - **代理协议**：Trojan、VLESS (Reality / Vision)、VMess、Shadowsocks、Hysteria 2、TUIC。
 - **订阅源格式**：Base64 编码订阅流、SIP002 纯文本链接列表、Clash / Clash.Meta / Mihomo YAML 复杂格式。
 
-### 7. 现代化 Web 管理面板
+### 8. 现代化 Web 管理面板
 - 开箱即用深色模式 UI，支持在线订阅管理、别名配置、一键复制、拦截规则配置（自定义域名/IP/应用包名黑名单）。
 
 ---
