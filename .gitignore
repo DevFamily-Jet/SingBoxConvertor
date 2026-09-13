@@ -1,0 +1,22 @@
+# Local persistent storage & caches
+dev_kv_store.json
+singbox_converter_dev_kv.json
+*.db
+*.log
+*.tmp
+
+# Temporary files
+test_*.json
+sub_*.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Dependencies & frameworks
+node_modules/
+.wrangler/
+dist/
+.DS_Store
+Thumbs.db
+.vs/

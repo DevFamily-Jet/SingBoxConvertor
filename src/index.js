@@ -958,8 +958,15 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
     {
       action: "route",
       domain_suffix: [
-        "cloudflare-ech.com"
+        "cloudflare-ech.com",
+        "cdn-apple.com",
+        "apple.com"
       ],
+      server: "dns-direct"
+    },
+    {
+      action: "route",
+      rule_set: "geosite-cn",
       server: "dns-direct"
     },
     {
@@ -1016,13 +1023,12 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
       },
       {
         tag: "dns-remote",
-        type: "udp",
+        type: "tcp",
         server: "8.8.8.8",
         detour: "proxy"
       }
     ],
     rules: dnsRules,
-    rule_set: ruleSets,
     final: "dns-remote"
   };
 

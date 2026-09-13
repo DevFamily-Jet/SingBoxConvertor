@@ -6,6 +6,7 @@ import sys
 import subprocess
 import tempfile
 import signal
+import urllib.parse
 
 PORT = 8787
 socketserver.TCPServer.allow_reuse_address = True
@@ -108,6 +109,13 @@ const content = fs.readFileSync('src/index.js', 'utf8');
 
 const sandbox = {
     console,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    AbortController,
+    Headers,
+    Request,
     atob: s => Buffer.from(s, 'base64').toString('binary'),
     btoa: s => Buffer.from(s, 'binary').toString('base64'),
     URL,
@@ -160,13 +168,18 @@ sandbox.convertFromUrl(input.sourceUrl, {
                 with open(temp_filepath, "w", encoding="utf-8") as tf:
                     tf.write(proc.stdout)
                 # 同步自动更新 SFW 客户端正在使用的 Profile 映射文件
-                sfw_profile = r"C:\ProgramData\sing-box\profiles\03da73d5-a3ed-495b-bdd8-fb23c45bff93.json"
-                if os.path.exists(sfw_profile):
-                    try:
-                        with open(sfw_profile, "w", encoding="utf-8") as pf:
-                            pf.write(proc.stdout)
-                    except Exception:
-                        pass
+                sfw_dir = r"C:\ProgramData\sing-box\profiles"
+                if os.path.exists(sfw_dir):
+                    import glob
+                    for pf in glob.glob(os.path.join(sfw_dir, "*.json")):
+                        try:
+                            with open(pf, "r", encoding="utf-8") as f:
+                                d = json.load(f)
+                            if len(d.get("outbounds", [])) >= 50 or os.path.basename(pf).startswith("23cac9d9"):
+                                with open(pf, "w", encoding="utf-8") as f:
+                                    f.write(proc.stdout)
+                        except Exception:
+                            pass
                 sys.stderr.write(f"\n[OK] 转换成功! 配置文件已持久保存在临时目录:\n     -> {temp_filepath}\n\n")
                 sys.stderr.flush()
             except Exception as fe:
@@ -201,7 +214,11 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path in ["/", "/index.html"]:
+        parsed_url = urllib.parse.urlparse(self.path)
+        req_path = parsed_url.path
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+
+        if req_path in ["/", "/index.html"]:
             with open(r"z:\SingBoxConvertor\src\index.js", "r", encoding="utf-8") as f:
                 js_content = f.read()
             idx1 = js_content.find("function renderHtml(origin) {")
@@ -214,7 +231,7 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(t.encode("utf-8"))
-        elif self.path == "/api/list":
+        elif req_path == "/api/list":
             items = []
             for k, v in mock_kv.items():
                 if k.startswith("sub:"):
@@ -224,8 +241,8 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"))
-        elif self.path.startswith("/sub/"):
-            sub_id = self.path[5:]
+        elif req_path.startswith("/sub/"):
+            sub_id = req_path[5:].strip()
             raw_entry = mock_kv.get(f"sub:{sub_id}")
             if not raw_entry:
                 self.send_response(404)
@@ -235,6 +252,11 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             sub_info = json.loads(raw_entry)
+            if "version" in query_params:
+                sub_info["targetVersion"] = query_params["version"][0]
+            if "tun" in query_params:
+                sub_info["enableTun"] = query_params["tun"][0].lower() != "false"
+
             config_json, temp_filepath, err = run_conversion_and_save(sub_id, sub_info)
             if config_json:
                 self.send_response(200)
@@ -247,6 +269,31 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(f"订阅转换失败: {err}".encode("utf-8"))
+        elif req_path == "/convert":
+            source_url = query_params.get("url", [""])[0]
+            if not source_url:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write("Missing ?url= parameter".encode("utf-8"))
+                return
+            convert_info = {
+                "sourceUrl": source_url,
+                "targetVersion": query_params.get("version", ["1.14"])[0],
+                "enableTun": query_params.get("tun", ["true"])[0].lower() != "false",
+                "rejectRules": {}
+            }
+            config_json, _, err = run_conversion_and_save("temp_convert", convert_info)
+            if config_json:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(config_json.encode("utf-8"))
+            else:
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(f"转换失败: {err}".encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -331,13 +378,14 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": True}, ensure_ascii=False).encode("utf-8"))
 
-print(f"=======================================================")
-print(f" Local Worker Server started at http://127.0.0.1:{PORT}")
-print(f" 临时转换目录: {TEMP_DIR}")
-print(f" 数据存储文件: {KV_STORE_FILE}")
-print(f" 注意: 后台关闭或重启后，临时文件与订阅数据均永久保留！")
-print(f"=======================================================")
-sys.stdout.flush()
+if __name__ == "__main__":
+    print(f"=======================================================")
+    print(f" Local Worker Server started at http://127.0.0.1:{PORT}")
+    print(f" 临时转换目录: {TEMP_DIR}")
+    print(f" 数据存储文件: {KV_STORE_FILE}")
+    print(f" 注意: 后台关闭或重启后，临时文件与订阅数据均永久保留！")
+    print(f"=======================================================")
+    sys.stdout.flush()
 
-with socketserver.TCPServer(("127.0.0.1", PORT), LocalDevHandler) as httpd:
-    httpd.serve_forever()
+    with socketserver.TCPServer(("127.0.0.1", PORT), LocalDevHandler) as httpd:
+        httpd.serve_forever()
