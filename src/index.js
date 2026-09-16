@@ -820,6 +820,12 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
       action: "hijack-dns",
       protocol: "dns"
     },
+    // 拦截 QUIC (UDP 443)，促使 Chrome/浏览器无感平滑回退到稳定的 TCP HTTP/2，彻底根除 YouTube 掉区与 Gemini 地区不支持问题
+    {
+      action: "reject",
+      network: "udp",
+      port: [443]
+    },
     // ECH 域名直连 (防止循环死锁)
     {
       action: "route",

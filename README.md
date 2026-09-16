@@ -41,6 +41,7 @@
 - **ECH 循环互锁根除**：强制将 `cloudflare-ech.com` 的 DNS 查询定向至阿里直连 DNS（`223.5.5.5`）并直连出站，彻底打破 ECH 与代理握手之间的死锁与 15.9s 超时。
 - **Google 遥测服务分流**：将 `gvt1.com`、`gvt2.com`、`gcp.gvt2.com` 明确指定走代理，避免直连超时拖慢网络响应。
 - **WebSocket 0-RTT 性能加速**：自动识别 `path` 含 `ed=` 的 WebSocket 节点，注入 `max_early_data: 2048` 与 `Sec-WebSocket-Protocol` 头部，建连降低 1 个 RTT（减少 200~300ms 握手耗时）。
+- **QUIC (UDP 443) 智能阻断回退**：拦截浏览器发往境外 Google/YouTube 的 QUIC 协议数据包，促使浏览器在 0ms 内平滑回退至稳定的 TCP HTTP/2，彻底根除 Chrome 开启 QUIC 后导致的 YouTube 地区标丢失、Gemini 地区受限及黑屏卡死等痛点。
 - **测速防假死与平滑切换**：
   - 自动测速目标采用 Google 官方全球边缘探测源 `http://www.gstatic.com/generate_204`，根除 Cloudflare 80 端口 HTTP 400 导致的“无延迟”假死误判。
   - 采用 `interrupt_exist_connections: false`，节点测速切换时维持现有活动长连接，绝不闪断。
