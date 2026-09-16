@@ -1,12 +1,11 @@
-﻿name = "singbox-sub-worker"
+name = "sb"
 main = "src/index.js"
 compatibility_date = "2024-09-01"
 
 # KV 命名空间绑定配置
-# 部署后在 Cloudflare 后台创建名为 SUB_KV 的 KV 命名空间，并把 id 填入此处即可
 [[kv_namespaces]]
 binding = "SUB_KV"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "9ad9d89478af4fb09077c5a1d5025d58"
 
 # [vars]
 # ADMIN_KEY = "your_secret_admin_token" # 可选后台管理密码
