@@ -1,7 +1,7 @@
 # Sing-box 订阅动态转换与托管中心
 
 [![Cloudflare Workers](https://img.shields.io/badge/Deploy-Cloudflare%20Workers-orange?logo=cloudflare)](https://workers.cloudflare.com/)
-[![Sing-box](https://img.shields.io/badge/Sing--box-1.14%20%2F%201.15%20%2F%201.17+-blue)](https://sing-box.sagernet.org/)
+[![Sing-box](https://img.shields.io/badge/Sing--box-1.15%20%2F%201.17+-blue)](https://sing-box.sagernet.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 本项目是一个高性能、生产级的 **Sing-box 订阅转换与托管服务**，同时支持 **Cloudflare Workers 边缘云端部署** 与 **本地 Python 模拟运行**。
@@ -16,13 +16,29 @@
 - **端点固定**：为每个订阅生成永久端点（如 `https://your-worker.workers.dev/sub/my-sub` 或本地 `http://127.0.0.1:8787/sub/my-sub`）。
 - **一键更新**：机场源站更换域名或订阅地址失效时，仅需在 Web 控制台修改一次，全设备自动同步，无需逐个客户端重新导入。
 
-### 2. 跨版本全面兼容（Sing-box 1.14 / 1.15 / 1.17+ 平滑支持）
-- **TUN 协议栈自适应**：
-  - 遵循 Sing-box 官方迁移规范，完全移除了已在 1.15 弃用并在 1.17 即将移除的 TUN `stack` 选项。
-  - **1.14 核心**：缺省安全采用默认系统协议栈，语法校验 `Code 0` 零错误。
-  - **1.15+ 核心**：自动激活 sing-tun 官方全新自研的高性能原生 TCP/IP 协议栈，彻底消除 `"stack option in TUN has been deprecated"` 废弃警告。
+### 2. 全面标准化 Sing-box 1.15+ (原生协议栈与现代规则语法)
+- **协议栈完全原生化**：
+  - 全面标准化输出 Sing-box 1.15+ 现代配置，清理废弃的 1.14 旧版本生成选项。
+  - 自动激活 sing-tun 官方全新自研的高性能原生 TCP/IP 协议栈，语法校验 `Code 0` 零错误，彻底杜绝已废弃的旧版 `stack` 警告。
 
-### 3. DNS 架构深度加固与防断连机制
+### 3. 局域网共享代理 (LAN Proxy Sharing)
+- **多设备无感共享**：
+  - 内置混合代理入站监听全局地址 `0.0.0.0:2080`（同时支持 HTTP 与 SOCKS5）。
+  - 同一局域网或 Wi-Fi 下的手机、平板、Switch、电视盒子或其他 PC，只需在 Wi-Fi 设置中将代理设为主机的局域网 IP 与端口 `2080`，即可立即享受免客户端的全球代理加速。
+- **远程 / 局域网 Web 控制面板**：
+  - `clash_api` 监听地址同步开放为 `0.0.0.0:9090`，局域网任意设备均可直接在浏览器中打开 `http://<主机局域网IP>:9090/ui` 实时监控节点与测速。
+
+### 4. 智能拒绝拦截规则 (Reject Rules) 与包名 `*` 通配符支持
+- **包与域名智能分流**：
+  - *原理说明*：在 Sing-box 的路由规则体系中，单条规则内部的不同字段按**逻辑与 (AND)** 判定；若强行把域名与包名放在同一条规则里，会导致“只有来自特定包且访问特定域名时才拦截”，严重违背全局拦截初衷。
+  - *方案实现*：用户在配置界面中无论是分别填入还是混杂输入，后端解析引擎都会**智能自动识别分类**（识别 IP、域名、Android 包名、Windows 进程），并自动拆解生成独立的 `action: "reject"` 规则，确保逻辑生效且零冲突。
+- **Android 包名 `*` 通配符匹配**：
+  - Sing-box 原生的 `package_name` 仅支持精确全字匹配。
+  - 本转换器独创**通配符转译引擎**：检测到包名包含 `*`（如 `com.ss.android.*`、`*pinduoduo*`）时，自动将其编译为合法的正则表达式并输出至 Sing-box 原生支持的 **`package_name_regex`** 规则；普通包名则保持高效的 `package_name` 精确匹配！
+- **开箱即用默认规则**：
+  - 系统内置预填主流广告联盟/隐私数据采集 SDK 域名（穿山甲、友盟、Google 追踪等）以及后台偷跑/短视频流氓应用包名。
+
+### 5. DNS 架构深度加固与防断连机制
 - **远端 DNS 采用 TCP 传输 (`tcp://8.8.8.8`)**：
   - 传统 `udp://8.8.8.8` 在 WebSocket / Cloudflare CDN 等代理节点中无法稳定转发 UDP 53，极易引发 `(exchange6: read destination: EOF)` 严重解析失败。
   - 升级为 TCP 传输后，100% 兼容所有类型的机场节点（包括 CDN / WS / TLS 节点），彻底根除丢包与断流。
@@ -126,8 +142,8 @@ npx wrangler deploy
 | `/api/delete` | `POST` | 删除指定订阅 |
 
 ### 订阅可选 URL 查询参数
-* `?version=1.14`（默认）或 `?version=1.15`：指定输出的 Sing-box 规范版本。
-* `?tun=false`：关闭默认包含的 TUN 虚拟网卡入站（仅保留 mixed 混合代理端口 2080）。
+* `?version=1.15`（默认）：输出 Sing-box 1.15+ 现代标准规范。
+* `?tun=false`：关闭默认包含的 TUN 虚拟网卡入站（仅保留 mixed 局域网共享代理端口 2080）。
 
 ---
 

@@ -2,7 +2,7 @@
  * Cloudflare Worker: Sing-box 订阅动态转换服务 (带 KV 映射持久化)
  * 特性:
  * 1. 订阅持久化: 原地址与新地址一对一绑定，机场换域名只需在后台改一次，客户端订阅链接永久不变。
- * 2. 动态拉取与转换: 客户端发起请求时实时向机场请求最新节点，并转换为标准化 Sing-box 1.14/1.15 配置。
+ * 2. 动态拉取与转换: 客户端发起请求时实时向机场请求最新节点，并转换为标准化 Sing-box 1.15+ 配置。
  * 3. 智能容错: 启用 FakeIP DNS 模式，彻底解决 Cloudflare CDN 优选节点/WS 协议不支持 UDP 导致的断网问题。
  * 4. 内置管理页面: 开箱即用 Web 界面，提供订阅管理与测试。
  */
@@ -38,7 +38,7 @@ export default {
         });
       }
       return convertFromUrl(sourceUrl, {
-        targetVersion: url.searchParams.get("version") || "1.14",
+        targetVersion: url.searchParams.get("version") || "1.15",
         enableTun: url.searchParams.get("tun") !== "false"
       });
     }
@@ -99,7 +99,7 @@ async function handleClientSub(request, env, subId, url) {
     });
   }
 
-  const targetVersion = url.searchParams.get("version") || subInfo.targetVersion || "1.14";
+  const targetVersion = url.searchParams.get("version") || subInfo.targetVersion || "1.15";
   const enableTun = url.searchParams.get("tun") !== null
     ? url.searchParams.get("tun") !== "false"
     : (subInfo.enableTun !== false);
@@ -111,7 +111,7 @@ async function handleClientSub(request, env, subId, url) {
 }
 
 async function convertFromUrl(sourceUrl, options = {}) {
-  const targetVersion = options.targetVersion || "1.14";
+  const targetVersion = options.targetVersion || "1.15";
   const enableTun = options.enableTun !== false;
   const rejectRules = options.rejectRules || {};
   const env = options.env;
@@ -177,7 +177,7 @@ async function convertFromUrl(sourceUrl, options = {}) {
 async function fetchSubscriptionWithRetry(url, maxRetries = 2) {
   let lastErr;
   const headers = {
-    "User-Agent": "sing-box/1.14.0; clash.meta; Mozilla/5.0",
+    "User-Agent": "sing-box/1.15.0; clash.meta; Mozilla/5.0",
     "Accept": "*/*"
   };
 
@@ -754,7 +754,7 @@ function safeBase64Decode(str) {
   }
 }
 
-function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true, rejectRules = {} }) {
+function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true, rejectRules = {} }) {
   const nodeTags = nodes.map(n => n.tag);
   const selectorOutbounds = ["auto", ...nodeTags, "direct"];
 
@@ -777,7 +777,7 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
   inbounds.push({
     type: "mixed",
     tag: "mixed-in",
-    listen: "127.0.0.1",
+    listen: "0.0.0.0",
     listen_port: 2080
   });
 
@@ -876,88 +876,127 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
     }
   ];
 
-  // 1. 自定义域名拒绝 (DNS & Route)
-  const customDomains = Array.isArray(rejectRules.domains) ? rejectRules.domains : [];
-  if (customDomains.length > 0) {
-    const domainSuffixes = new Set();
-    const exactDomains = new Set();
-    const domainKeywords = new Set();
+  // --- 自定义拒绝拦截规则 (DNS & Route) ---
+  // 支持域名、IP/CIDR、Android 应用包名（支持 * 通配符，自动转为 package_name_regex）及桌面进程名（.exe）
+  // 即使在用户界面或配置中将包名与域名放置在一起，也会智能识别分流并生成独立的 Sing-box 路由规则，避免逻辑与（AND）导致失效
+  const domainSuffixSet = new Set();
+  const domainExactSet = new Set();
+  const domainRegexSet = new Set();
+  const ipCidrSet = new Set();
+  const exactPackageSet = new Set();
+  const wildcardPackageRegexSet = new Set();
+  const exactProcessSet = new Set();
+  const wildcardProcessRegexSet = new Set();
 
-    customDomains.forEach(d => {
-      d = String(d).trim().toLowerCase();
-      if (!d) return;
-
-      // 提取核心域名
-      let clean = d;
-      if (clean.startsWith("*.")) clean = clean.substring(2);
-      else if (clean.startsWith(".")) clean = clean.substring(1);
-
-      if (!clean) return;
-
-      exactDomains.add(clean);
-      domainSuffixes.add(clean);
-      // 同时添加 keyword 确保不论多级子域名 a.b.vivo.com.cn 还是嗅探阶段都能100%命中
-      domainKeywords.add(clean);
-    });
-
-    const suffixesArr = Array.from(domainSuffixes);
-    const exactArr = Array.from(exactDomains);
-    const keywordArr = Array.from(domainKeywords);
-
-    const dnsRule = {
-      action: "reject",
-      domain_suffix: suffixesArr,
-      domain: exactArr
-    };
-    const routeRule = {
-      action: "reject",
-      domain_suffix: suffixesArr,
-      domain: exactArr,
-      domain_keyword: keywordArr
-    };
-
-    dnsRules.push(dnsRule);
-    routeRules.push(routeRule);
+  function wildcardToRegex(p) {
+    return "^" + p.split("*").map(s => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$";
   }
 
-  // 2. 自定义 IP / CIDR 拒绝 (Route)
-  const customIps = Array.isArray(rejectRules.ips) ? rejectRules.ips : [];
-  if (customIps.length > 0) {
-    routeRules.push({ action: "reject", ip_cidr: customIps });
-  }
+  function addRejectItem(rawItem) {
+    if (!rawItem) return;
+    const item = String(rawItem).trim();
+    if (!item) return;
+    const lower = item.toLowerCase();
 
-  // 3. 自定义包名 / 进程名拒绝 (兼容 Android package_name 和 Windows/Linux/macOS process_name)
-  const customPackages = Array.isArray(rejectRules.packages) ? rejectRules.packages : [];
-  if (customPackages.length > 0) {
-    const androidPkgs = new Set();
-    const procs = new Set();
+    // 1. IP / CIDR 识别 (如 1.2.3.4, 192.168.1.0/24, 2001:db8::/32)
+    if (/^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$/.test(item) || /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(\/\d{1,3})?$/.test(item)) {
+      ipCidrSet.add(item.includes("/") ? item : item + (item.includes(":") ? "/128" : "/32"));
+      return;
+    }
 
-    customPackages.forEach(p => {
-      p = String(p).trim();
-      if (!p) return;
-      const lower = p.toLowerCase();
-
-      // Android 包名通常包含点且不以 .exe 结尾，如 com.vivo.browser
-      if (p.includes(".") && !lower.endsWith(".exe")) {
-        androidPkgs.add(p);
-      }
-
-      // 桌面进程名
-      if (lower.endsWith(".exe")) {
-        procs.add(p);
+    // 2. 桌面进程名识别 (以 .exe 结尾或包含 .exe)
+    if (lower.endsWith(".exe") || lower.includes(".exe")) {
+      if (item.includes("*")) {
+        wildcardProcessRegexSet.add(wildcardToRegex(item));
       } else {
-        // 不带 .exe 的也同时添加原型和 .exe 版本，兼容 Linux/macOS/Windows
-        procs.add(p);
-        procs.add(p + ".exe");
+        exactProcessSet.add(item);
       }
-    });
+      return;
+    }
 
-    if (androidPkgs.size > 0) {
-      routeRules.push({ action: "reject", package_name: Array.from(androidPkgs) });
+    // 3. Android 应用包名识别
+    // 包名特点：以 com., org., net., io., cn., tv., me., android., app. 开头，包含点，且不以常见域名后缀 (.com, .cn 等) 结尾
+    const isDomainTld = /\.(com|cn|net|org|io|me|xyz|top|site|cc|info|app|co|de|uk|jp|ru|us|hk|tw|sg|biz|tv|gov|edu)(\.[a-z]{2})?$/i.test(item);
+    const looksLikePackage = /^(com|org|net|io|cn|tv|me|android|app)\.[a-zA-Z0-9_.*]+$/.test(item);
+
+    if (looksLikePackage && !isDomainTld) {
+      if (item.includes("*")) {
+        // 通配符自动转换为正则，例如: com.ss.android.* -> ^com\.ss\.android\..*$
+        wildcardPackageRegexSet.add(wildcardToRegex(item));
+      } else {
+        exactPackageSet.add(item);
+      }
+      return;
     }
-    if (procs.size > 0) {
-      routeRules.push({ action: "reject", process_name: Array.from(procs) });
+
+    // 4. 域名识别与处理 (支持 *.domain.com, .domain.com, domain.com, 以及含 * 的正则表达式)
+    let clean = item;
+    if (clean.startsWith("*.")) clean = clean.substring(2);
+    else if (clean.startsWith(".")) clean = clean.substring(1);
+
+    if (clean.includes("*")) {
+      // 内部含通配符的域名 (如 ad*.google.com)
+      domainRegexSet.add(wildcardToRegex(clean));
+    } else if (clean) {
+      domainSuffixSet.add(clean.toLowerCase());
+      domainExactSet.add(clean.toLowerCase());
     }
+  }
+
+  // 接收并解构用户规则输入（无论分别输入还是混杂输入，均会自动分类）
+  const parseRawArr = (arr) => {
+    if (!arr) return;
+    const list = Array.isArray(arr) ? arr : [arr];
+    list.forEach(val => {
+      String(val).replace(/\\n/g, "\n").split(/[\s,\r\n]+/).forEach(s => {
+        if (s.trim()) addRejectItem(s.trim());
+      });
+    });
+  };
+
+  parseRawArr(rejectRules.domains);
+  parseRawArr(rejectRules.ips);
+  parseRawArr(rejectRules.packages);
+
+  // 1. 生成域名拒绝规则 (DNS & Route)
+  if (domainSuffixSet.size > 0 || domainExactSet.size > 0 || domainRegexSet.size > 0) {
+    const dRuleDns = { action: "reject" };
+    const dRuleRoute = { action: "reject" };
+    if (domainSuffixSet.size > 0) {
+      dRuleDns.domain_suffix = Array.from(domainSuffixSet);
+      dRuleRoute.domain_suffix = Array.from(domainSuffixSet);
+    }
+    if (domainExactSet.size > 0) {
+      dRuleDns.domain = Array.from(domainExactSet);
+      dRuleRoute.domain = Array.from(domainExactSet);
+    }
+    if (domainRegexSet.size > 0) {
+      dRuleDns.domain_regex = Array.from(domainRegexSet);
+      dRuleRoute.domain_regex = Array.from(domainRegexSet);
+    }
+    dnsRules.push(dRuleDns);
+    routeRules.push(dRuleRoute);
+  }
+
+  // 2. 生成 IP / CIDR 拒绝规则 (Route)
+  if (ipCidrSet.size > 0) {
+    routeRules.push({ action: "reject", ip_cidr: Array.from(ipCidrSet) });
+  }
+
+  // 3. 生成 Android 包名拒绝规则 (Route)
+  if (exactPackageSet.size > 0) {
+    routeRules.push({ action: "reject", package_name: Array.from(exactPackageSet) });
+  }
+  if (wildcardPackageRegexSet.size > 0) {
+    routeRules.push({ action: "reject", package_name_regex: Array.from(wildcardPackageRegexSet) });
+  }
+
+  // 4. 生成 桌面进程名 拒绝规则 (Route)
+  if (exactProcessSet.size > 0) {
+    routeRules.push({ action: "reject", process_name: Array.from(exactProcessSet) });
+  }
+  if (wildcardProcessRegexSet.size > 0) {
+    routeRules.push({ action: "reject", process_path_regex: Array.from(wildcardProcessRegexSet) });
   }
 
   dnsRules.push(
@@ -1078,7 +1117,7 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.14", enableTun = true
     route,
     experimental: {
       clash_api: {
-        external_controller: "127.0.0.1:9090",
+        external_controller: "0.0.0.0:9090",
         external_ui: "ui",
         external_ui_download_url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip",
         external_ui_download_detour: "proxy",
@@ -1139,7 +1178,7 @@ async function handleApiCreate(request, env, corsHeaders) {
   const data = {
     sourceUrl,
     name: body.name || "默认订阅",
-    targetVersion: body.targetVersion || "1.14",
+    targetVersion: body.targetVersion || "1.15",
     enableTun: body.enableTun !== false,
     rejectRules: {
       domains: parseInputList(body.rejectDomains),
@@ -1173,7 +1212,7 @@ async function handleApiUpdate(request, env, corsHeaders) {
     ...prev,
     sourceUrl: body.sourceUrl ? body.sourceUrl.trim() : prev.sourceUrl,
     name: body.name || prev.name,
-    targetVersion: body.targetVersion || prev.targetVersion,
+    targetVersion: body.targetVersion || prev.targetVersion || "1.15",
     enableTun: body.enableTun !== undefined ? body.enableTun : prev.enableTun,
     rejectRules: {
       domains: body.rejectDomains !== undefined ? parseInputList(body.rejectDomains) : (prev.rejectRules?.domains || []),
@@ -1201,8 +1240,10 @@ async function handleApiDelete(request, env, corsHeaders) {
 
 function parseInputList(val) {
   if (!val) return [];
-  if (Array.isArray(val)) return val.map(s => String(s).trim()).filter(Boolean);
-  return String(val).split(/[\s,\r\n]+/).map(s => s.trim()).filter(Boolean);
+  if (Array.isArray(val)) {
+    return val.flatMap(s => String(s).replace(/\\n/g, "\n").split(/[\s,\r\n]+/)).map(s => s.trim()).filter(Boolean);
+  }
+  return String(val).replace(/\\n/g, "\n").split(/[\s,\r\n]+/).map(s => s.trim()).filter(Boolean);
 }
 
 function renderHtml(origin) {
@@ -1305,8 +1346,7 @@ function renderHtml(origin) {
         <div class="form-group">
           <label>目标 Sing-box 规范版本</label>
           <select id="targetVersion">
-            <option value="1.14" selected>Sing-box 1.14+ (稳定版，支持 FakeIP)</option>
-            <option value="1.15">Sing-box 1.15+ (最新先行版)</option>
+            <option value="1.15" selected>Sing-box 1.15+ (稳定标准版，支持 FakeIP / 原生 TUN)</option>
           </select>
         </div>
       </div>
@@ -1315,23 +1355,36 @@ function renderHtml(origin) {
       <div class="rules-section">
         <div class="rules-header">
           🛡️ 自定义拒绝拦截规则 (Reject Rules)
-          <span class="label-hint" style="color: #94a3b8;">命中的流量将在 DNS 和路由层直接拒接 (Action: reject)</span>
+          <span class="label-hint" style="color: #94a3b8;">命中的流量将在 DNS 和路由层直接拒接 (Action: reject)；智能识别支持包名与域名混填、包名支持 * 通配符</span>
         </div>
         
         <div class="grid-3">
           <div class="form-group">
-            <label>拒绝域名 (Domain / Suffix)<span class="label-hint">逗号或换行分隔</span></label>
-            <textarea id="rejectDomains" placeholder="例如:&#10;tiktok.com&#10;douyin.com&#10;*.pinduoduo.com"></textarea>
+            <label>拒绝域名 (Domain / Suffix)<span class="label-hint">每行一个，支持 *. 前缀</span></label>
+            <textarea id="rejectDomains" rows="6" placeholder="每行一个域名">*.pangolin-sdk-toutiao.com
+*.pglstatp-toutiao.com
+*.pangle-ads.com
+adservice.google.com
+app-measurement.com
+analytics.google.com
+*.umeng.com
+*.umengcloud.com
+*.open.e.kuaishou.com
+*.ad.xiaomi.com</textarea>
           </div>
           
           <div class="form-group">
-            <label>拒绝 IP 地址段 (IP / CIDR)<span class="label-hint">逗号或换行分隔</span></label>
-            <textarea id="rejectIps" placeholder="例如:&#10;123.56.78.90/32&#10;203.0.113.0/24"></textarea>
+            <label>拒绝 IP 地址段 (IP / CIDR)<span class="label-hint">每行一个或逗号分隔</span></label>
+            <textarea id="rejectIps" rows="6" placeholder="例如:&#10;123.56.78.90/32&#10;203.0.113.0/24"></textarea>
           </div>
 
           <div class="form-group">
-            <label>拒绝应用包名 / 进程名<span class="label-hint">安卓包名或电脑进程</span></label>
-            <textarea id="rejectPackages" placeholder="例如:&#10;com.ss.android.ugc.aweme&#10;WeChat.exe&#10;douyin.exe"></textarea>
+            <label>拒绝应用包名 / 进程名<span class="label-hint">安卓包名支持 * 通配符，电脑进程支持 .exe</span></label>
+            <textarea id="rejectPackages" rows="6" placeholder="例如:&#10;com.ss.android.*&#10;pinduoduo.exe">com.ss.android.*
+com.smile.gifmaker
+com.kuaishou.nebula
+com.xunmeng.pinduoduo
+pinduoduo.exe</textarea>
           </div>
         </div>
       </div>
@@ -1391,7 +1444,7 @@ function renderHtml(origin) {
               '<div>' +
                 '<span class="sub-title">' + (item.name || '未命名') + '</span> ' +
                 '<span class="badge">ID: ' + item.id + '</span> ' +
-                '<span class="badge">v' + (item.targetVersion || '1.14') + '</span> ' +
+                '<span class="badge">v' + (item.targetVersion || '1.15') + '</span> ' +
                 rejectBadges +
               '</div>' +
               '<div style="display:flex;gap:6px;">' +
@@ -1421,7 +1474,7 @@ function renderHtml(origin) {
       const name = document.getElementById('subName').value.trim();
       const sourceUrl = document.getElementById('sourceUrl').value.trim();
       const id = document.getElementById('subId').value.trim();
-      const targetVersion = document.getElementById('targetVersion').value;
+      const targetVersion = document.getElementById('targetVersion').value || '1.15';
       const rejectDomains = document.getElementById('rejectDomains').value;
       const rejectIps = document.getElementById('rejectIps').value;
       const rejectPackages = document.getElementById('rejectPackages').value;
@@ -1442,7 +1495,8 @@ function renderHtml(origin) {
         if (ret.success) {
           const fileMsg = ret.filePath ? ('\\n\\n📁 本地文件已生成保存：\\n' + ret.filePath + '\\n(后台关闭后此文件不会自动删除，可长期用于调试)') : '';
           alert('🎉 创建成功！专属订阅地址已生成并绑定。' + fileMsg);
-          ['sourceUrl','subId','rejectDomains','rejectIps','rejectPackages'].forEach(k => document.getElementById(k).value = '');
+          document.getElementById('sourceUrl').value = '';
+          document.getElementById('subId').value = '';
           loadSubs();
         } else {
           if (ret.error && ret.error.includes('SUB_KV')) {
@@ -1474,7 +1528,7 @@ function renderHtml(origin) {
       document.getElementById('editId').textContent = id;
       document.getElementById('editName').value = item.name || '';
       document.getElementById('editSourceUrl').value = item.sourceUrl || '';
-      document.getElementById('editTargetVersion').value = item.targetVersion || '1.14';
+      document.getElementById('editTargetVersion').value = item.targetVersion || '1.15';
       document.getElementById('editRejectDomains').value = (rules.domains || []).join('\\n');
       document.getElementById('editRejectIps').value = (rules.ips || []).join('\\n');
       document.getElementById('editRejectPackages').value = (rules.packages || []).join('\\n');
@@ -1499,7 +1553,7 @@ function renderHtml(origin) {
             id: _editingId,
             name: document.getElementById('editName').value.trim(),
             sourceUrl: document.getElementById('editSourceUrl').value.trim(),
-            targetVersion: document.getElementById('editTargetVersion').value,
+            targetVersion: document.getElementById('editTargetVersion').value || '1.15',
             rejectDomains: document.getElementById('editRejectDomains').value,
             rejectIps: document.getElementById('editRejectIps').value,
             rejectPackages: document.getElementById('editRejectPackages').value
@@ -1555,8 +1609,7 @@ function renderHtml(origin) {
       <div class="form-group">
         <label>目标版本</label>
         <select id="editTargetVersion">
-          <option value="1.14">Sing-box 1.14+</option>
-          <option value="1.15">Sing-box 1.15+</option>
+          <option value="1.15" selected>Sing-box 1.15+</option>
         </select>
       </div>
 

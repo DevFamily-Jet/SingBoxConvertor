@@ -60,6 +60,41 @@ def load_kv_from_disk():
             with open(KV_STORE_FILE, "r", encoding="utf-8") as f:
                 mock_kv = json.load(f)
                 if mock_kv:
+                    updated = False
+                    for k, v in list(mock_kv.items()):
+                        try:
+                            obj = json.loads(v)
+                            if obj.get("targetVersion") == "1.14":
+                                obj["targetVersion"] = "1.15"
+                                updated = True
+                            rules = obj.get("rejectRules", {})
+                            if not rules.get("domains") and not rules.get("packages"):
+                                rules["domains"] = [
+                                    "*.pangolin-sdk-toutiao.com",
+                                    "*.pglstatp-toutiao.com",
+                                    "*.pangle-ads.com",
+                                    "adservice.google.com",
+                                    "app-measurement.com",
+                                    "analytics.google.com",
+                                    "*.umeng.com",
+                                    "*.umengcloud.com",
+                                    "*.open.e.kuaishou.com",
+                                    "*.ad.xiaomi.com"
+                                ]
+                                rules["packages"] = [
+                                    "com.ss.android.*",
+                                    "com.smile.gifmaker",
+                                    "com.kuaishou.nebula",
+                                    "com.xunmeng.pinduoduo",
+                                    "pinduoduo.exe"
+                                ]
+                                obj["rejectRules"] = rules
+                                updated = True
+                            mock_kv[k] = json.dumps(obj, ensure_ascii=False)
+                        except Exception:
+                            pass
+                    if updated:
+                        save_kv_to_disk()
                     return
         except Exception:
             pass
@@ -68,26 +103,60 @@ def load_kv_from_disk():
         "sub:99": json.dumps({
             "sourceUrl": "https://js.ebox.de5.net/jsh/sub?target=clash",
             "name": "主力机场 (99)",
-            "targetVersion": "1.14",
+            "targetVersion": "1.15",
             "enableTun": True,
             "rejectRules": {
-                "domains": [],
+                "domains": [
+                    "*.pangolin-sdk-toutiao.com",
+                    "*.pglstatp-toutiao.com",
+                    "*.pangle-ads.com",
+                    "adservice.google.com",
+                    "app-measurement.com",
+                    "analytics.google.com",
+                    "*.umeng.com",
+                    "*.umengcloud.com",
+                    "*.open.e.kuaishou.com",
+                    "*.ad.xiaomi.com"
+                ],
                 "ips": [],
-                "packages": []
+                "packages": [
+                    "com.ss.android.*",
+                    "com.smile.gifmaker",
+                    "com.kuaishou.nebula",
+                    "com.xunmeng.pinduoduo",
+                    "pinduoduo.exe"
+                ]
             },
-            "updatedAt": "2026-09-13T03:13:00.000Z"
+            "updatedAt": "2026-09-26T03:13:00.000Z"
         }, ensure_ascii=False),
         "sub:sample-sub": json.dumps({
             "sourceUrl": "https://example.com/api/v1/client/subscribe?token=demo_token",
             "name": "示例主力机场 (含拦截规则)",
-            "targetVersion": "1.14",
+            "targetVersion": "1.15",
             "enableTun": True,
             "rejectRules": {
-                "domains": ["tiktok.com", "douyin.com", "adservice.google.com"],
+                "domains": [
+                    "*.pangolin-sdk-toutiao.com",
+                    "*.pglstatp-toutiao.com",
+                    "*.pangle-ads.com",
+                    "adservice.google.com",
+                    "app-measurement.com",
+                    "analytics.google.com",
+                    "*.umeng.com",
+                    "*.umengcloud.com",
+                    "*.open.e.kuaishou.com",
+                    "*.ad.xiaomi.com"
+                ],
                 "ips": ["123.56.78.90/32"],
-                "packages": ["com.ss.android.ugc.aweme", "pinduoduo.exe"]
+                "packages": [
+                    "com.ss.android.*",
+                    "com.smile.gifmaker",
+                    "com.kuaishou.nebula",
+                    "com.xunmeng.pinduoduo",
+                    "pinduoduo.exe"
+                ]
             },
-            "updatedAt": "2026-09-12T06:30:00.000Z"
+            "updatedAt": "2026-09-26T06:30:00.000Z"
         }, ensure_ascii=False)
     }
     save_kv_to_disk()
@@ -127,7 +196,7 @@ vm.createContext(sandbox);
 vm.runInContext(content.replace('export default {', 'const handler = {'), sandbox);
 
 sandbox.convertFromUrl(input.sourceUrl, {
-    targetVersion: input.targetVersion || "1.14",
+    targetVersion: input.targetVersion || "1.15",
     enableTun: input.enableTun !== false,
     rejectRules: input.rejectRules || {}
 }).then(resp => {
@@ -146,7 +215,7 @@ sandbox.convertFromUrl(input.sourceUrl, {
 """
         payload = json.dumps({
             "sourceUrl": source_url,
-            "targetVersion": sub_info.get("targetVersion", "1.14"),
+            "targetVersion": sub_info.get("targetVersion", "1.15"),
             "enableTun": sub_info.get("enableTun", True),
             "rejectRules": sub_info.get("rejectRules", {})
         })
@@ -279,7 +348,7 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 return
             convert_info = {
                 "sourceUrl": source_url,
-                "targetVersion": query_params.get("version", ["1.14"])[0],
+                "targetVersion": query_params.get("version", ["1.15"])[0],
                 "enableTun": query_params.get("tun", ["true"])[0].lower() != "false",
                 "rejectRules": {}
             }
@@ -307,14 +376,14 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             sub_info = {
                 "sourceUrl": body.get("sourceUrl"),
                 "name": body.get("name") or "未命名订阅",
-                "targetVersion": body.get("targetVersion", "1.14"),
+                "targetVersion": body.get("targetVersion", "1.15"),
                 "enableTun": body.get("enableTun", True),
                 "rejectRules": {
-                    "domains": [s.strip() for s in body.get("rejectDomains", "").replace("\n", ",").split(",") if s.strip()],
-                    "ips": [s.strip() for s in body.get("rejectIps", "").replace("\n", ",").split(",") if s.strip()],
-                    "packages": [s.strip() for s in body.get("rejectPackages", "").replace("\n", ",").split(",") if s.strip()]
+                    "domains": [s.strip() for s in body.get("rejectDomains", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
+                    "ips": [s.strip() for s in body.get("rejectIps", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
+                    "packages": [s.strip() for s in body.get("rejectPackages", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()]
                 },
-                "updatedAt": "2026-09-13T03:30:00.000Z"
+                "updatedAt": "2026-09-26T03:30:00.000Z"
             }
             mock_kv[f"sub:{sub_id}"] = json.dumps(sub_info, ensure_ascii=False)
             save_kv_to_disk()
@@ -338,14 +407,14 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 sub_info = {
                     "sourceUrl": body.get("sourceUrl") or prev.get("sourceUrl"),
                     "name": body.get("name") or prev.get("name"),
-                    "targetVersion": body.get("targetVersion") or prev.get("targetVersion", "1.14"),
+                    "targetVersion": body.get("targetVersion") or prev.get("targetVersion", "1.15"),
                     "enableTun": prev.get("enableTun", True),
                     "rejectRules": {
-                        "domains": [s.strip() for s in body.get("rejectDomains", "").replace("\n", ",").split(",") if s.strip()],
-                        "ips": [s.strip() for s in body.get("rejectIps", "").replace("\n", ",").split(",") if s.strip()],
-                        "packages": [s.strip() for s in body.get("rejectPackages", "").replace("\n", ",").split(",") if s.strip()]
+                        "domains": [s.strip() for s in body.get("rejectDomains", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
+                        "ips": [s.strip() for s in body.get("rejectIps", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
+                        "packages": [s.strip() for s in body.get("rejectPackages", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()]
                     },
-                    "updatedAt": "2026-09-13T03:30:00.000Z"
+                    "updatedAt": "2026-09-26T03:30:00.000Z"
                 }
                 mock_kv[f"sub:{sub_id}"] = json.dumps(sub_info, ensure_ascii=False)
                 save_kv_to_disk()
