@@ -653,6 +653,9 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(json.dumps({"success": True}, ensure_ascii=False).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 if __name__ == "__main__":
     print(f"=======================================================")
