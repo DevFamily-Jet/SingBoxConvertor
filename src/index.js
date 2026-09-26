@@ -43,7 +43,7 @@ export default {
       });
     }
 
-    // 3. 后台 API
+    // 3. 后台订阅管理 API
     if (path === "/api/list") {
       return handleApiList(request, env, corsHeaders);
     }
@@ -55,6 +55,20 @@ export default {
     }
     if (path === "/api/delete" && request.method === "POST") {
       return handleApiDelete(request, env, corsHeaders);
+    }
+
+    // 规则配置文件 API
+    if (path === "/api/rule_profiles/list") {
+      return handleApiRuleProfilesList(request, env, corsHeaders);
+    }
+    if (path === "/api/rule_profiles/create" && request.method === "POST") {
+      return handleApiRuleProfilesCreate(request, env, corsHeaders);
+    }
+    if (path === "/api/rule_profiles/update" && request.method === "POST") {
+      return handleApiRuleProfilesUpdate(request, env, corsHeaders);
+    }
+    if (path === "/api/rule_profiles/delete" && request.method === "POST") {
+      return handleApiRuleProfilesDelete(request, env, corsHeaders);
     }
 
     // 4. 根路径: 极简可视化管理界面
@@ -70,6 +84,121 @@ export default {
     return new Response("Not Found", { status: 404 });
   }
 };
+
+const DEFAULT_RULE_PROFILES = [
+  {
+    id: "default",
+    name: "默认基础拦截 (广告SDK / 追踪 / 短视频)",
+    description: "拦截主流广告追踪联盟、开屏SDK及短视频后台数据同步",
+    domains: [
+      "*.pangolin-sdk-toutiao.com",
+      "*.pglstatp-toutiao.com",
+      "*.pangle-ads.com",
+      "adservice.google.com",
+      "app-measurement.com",
+      "analytics.google.com",
+      "*.umeng.com",
+      "*.umengcloud.com",
+      "*.open.e.kuaishou.com",
+      "*.ad.xiaomi.com"
+    ],
+    ips: [],
+    packages: [
+      "com.ss.android.*",
+      "com.smile.gifmaker",
+      "com.kuaishou.nebula",
+      "com.xunmeng.pinduoduo",
+      "pinduoduo.exe"
+    ]
+  },
+  {
+    id: "strict",
+    name: "强力隐私防护 (含大数据埋点与厂商遥测)",
+    description: "在默认规则基础上，额外拦截设备指纹收集、用户行为埋点上报及国内厂商遥测",
+    domains: [
+      "*.pangolin-sdk-toutiao.com",
+      "*.pglstatp-toutiao.com",
+      "*.pangle-ads.com",
+      "adservice.google.com",
+      "app-measurement.com",
+      "analytics.google.com",
+      "*.umeng.com",
+      "*.umengcloud.com",
+      "*.open.e.kuaishou.com",
+      "*.ad.xiaomi.com",
+      "*.sensorsdata.cn",
+      "*.talkingdata.net",
+      "*.growingio.com",
+      "*.trackingio.com",
+      "log.byteoversea.com",
+      "*.data.bilibili.com"
+    ],
+    ips: [],
+    packages: [
+      "com.ss.android.*",
+      "com.smile.gifmaker",
+      "com.kuaishou.nebula",
+      "com.xunmeng.pinduoduo",
+      "pinduoduo.exe",
+      "com.tencent.tmgp.*",
+      "com.miui.analytics",
+      "com.vivo.pushservice"
+    ]
+  },
+  {
+    id: "none",
+    name: "直通无拦截 (None)",
+    description: "不执行任何自定义 reject 规则，所有流量按基础分流直连或代理",
+    domains: [],
+    ips: [],
+    packages: []
+  }
+];
+
+async function resolveRejectRules(env, subInfo) {
+  const profileId = subInfo.ruleProfileId || "default";
+  let profileRules = { domains: [], ips: [], packages: [] };
+
+  if (profileId === "none") {
+    profileRules = { domains: [], ips: [], packages: [] };
+  } else {
+    let raw = null;
+    if (env && env.SUB_KV) {
+      try {
+        raw = await env.SUB_KV.get("rule_profile:" + profileId);
+      } catch (e) {}
+    }
+    if (raw) {
+      try {
+        const obj = JSON.parse(raw);
+        profileRules = {
+          domains: obj.domains || [],
+          ips: obj.ips || [],
+          packages: obj.packages || []
+        };
+      } catch (e) {}
+    } else {
+      const def = DEFAULT_RULE_PROFILES.find(p => p.id === profileId) || DEFAULT_RULE_PROFILES[0];
+      profileRules = {
+        domains: def.domains || [],
+        ips: def.ips || [],
+        packages: def.packages || []
+      };
+    }
+  }
+
+  // 如果订阅自身还定义了额外/覆盖规则 (rejectRules)，则合并生效
+  const extra = subInfo.rejectRules || {};
+  const mergedDomains = [...(profileRules.domains || []), ...(extra.domains || [])];
+  const mergedIps = [...(profileRules.ips || []), ...(extra.ips || [])];
+  const mergedPackages = [...(profileRules.packages || []), ...(extra.packages || [])];
+
+  return {
+    domains: mergedDomains,
+    ips: mergedIps,
+    packages: mergedPackages
+  };
+}
 
 async function handleClientSub(request, env, subId, url) {
   if (!env.SUB_KV) {
@@ -104,7 +233,7 @@ async function handleClientSub(request, env, subId, url) {
     ? url.searchParams.get("tun") !== "false"
     : (subInfo.enableTun !== false);
 
-  const rejectRules = subInfo.rejectRules || {};
+  const rejectRules = await resolveRejectRules(env, subInfo);
 
   const subIdParam = subId;
   return convertFromUrl(subInfo.sourceUrl, { targetVersion, enableTun, rejectRules, env, subId: subIdParam });
@@ -1180,6 +1309,7 @@ async function handleApiCreate(request, env, corsHeaders) {
     name: body.name || "默认订阅",
     targetVersion: body.targetVersion || "1.15",
     enableTun: body.enableTun !== false,
+    ruleProfileId: body.ruleProfileId || "default",
     rejectRules: {
       domains: parseInputList(body.rejectDomains),
       ips: parseInputList(body.rejectIps),
@@ -1214,6 +1344,7 @@ async function handleApiUpdate(request, env, corsHeaders) {
     name: body.name || prev.name,
     targetVersion: body.targetVersion || prev.targetVersion || "1.15",
     enableTun: body.enableTun !== undefined ? body.enableTun : prev.enableTun,
+    ruleProfileId: body.ruleProfileId !== undefined ? body.ruleProfileId : (prev.ruleProfileId || "default"),
     rejectRules: {
       domains: body.rejectDomains !== undefined ? parseInputList(body.rejectDomains) : (prev.rejectRules?.domains || []),
       ips: body.rejectIps !== undefined ? parseInputList(body.rejectIps) : (prev.rejectRules?.ips || []),
@@ -1235,6 +1366,123 @@ async function handleApiDelete(request, env, corsHeaders) {
   if (id) {
     await env.SUB_KV.delete("sub:" + id);
   }
+  return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+}
+
+// ---- 规则配置文件 (Rule Profiles) API ----
+
+async function handleApiRuleProfilesList(request, env, corsHeaders) {
+  if (!env.SUB_KV) {
+    return new Response(JSON.stringify({ error: "SUB_KV not bound" }), { status: 500, headers: corsHeaders });
+  }
+  const list = await env.SUB_KV.list({ prefix: "rule_profile:" });
+  const items = [];
+  const foundIds = new Set();
+
+  for (let key of list.keys) {
+    const raw = await env.SUB_KV.get(key.name);
+    if (raw) {
+      try {
+        const obj = JSON.parse(raw);
+        const id = key.name.replace("rule_profile:", "");
+        items.push({ id, ...obj });
+        foundIds.add(id);
+      } catch (e) {}
+    }
+  }
+
+  // 确保系统预置模板存在
+  for (let def of DEFAULT_RULE_PROFILES) {
+    if (!foundIds.has(def.id)) {
+      items.push({ ...def, updatedAt: new Date().toISOString() });
+      try {
+        await env.SUB_KV.put("rule_profile:" + def.id, JSON.stringify(def));
+      } catch (e) {}
+    }
+  }
+
+  return new Response(JSON.stringify({ items }), {
+    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
+  });
+}
+
+async function handleApiRuleProfilesCreate(request, env, corsHeaders) {
+  if (!env.SUB_KV) {
+    return new Response(JSON.stringify({ error: "SUB_KV not bound" }), { status: 500, headers: corsHeaders });
+  }
+  const body = await request.json();
+  const id = (body.id || "rule_" + Math.random().toString(36).substring(2, 8)).trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  if (!id) {
+    return new Response(JSON.stringify({ error: "规则配置 ID 格式无效" }), { status: 400, headers: corsHeaders });
+  }
+
+  const existing = await env.SUB_KV.get("rule_profile:" + id);
+  if (existing) {
+    return new Response(JSON.stringify({ error: "该规则配置 ID 已存在，请更换" }), { status: 400, headers: corsHeaders });
+  }
+
+  const data = {
+    id,
+    name: (body.name || "自定义规则配置").trim(),
+    description: (body.description || "").trim(),
+    domains: parseInputList(body.domains),
+    ips: parseInputList(body.ips),
+    packages: parseInputList(body.packages),
+    updatedAt: new Date().toISOString()
+  };
+
+  await env.SUB_KV.put("rule_profile:" + id, JSON.stringify(data));
+  return new Response(JSON.stringify({ success: true, id, data }), { headers: corsHeaders });
+}
+
+async function handleApiRuleProfilesUpdate(request, env, corsHeaders) {
+  if (!env.SUB_KV) {
+    return new Response(JSON.stringify({ error: "SUB_KV not bound" }), { status: 500, headers: corsHeaders });
+  }
+  const body = await request.json();
+  const id = (body.id || "").trim();
+  if (!id) {
+    return new Response(JSON.stringify({ error: "缺少规则配置 ID" }), { status: 400, headers: corsHeaders });
+  }
+
+  let prev = {};
+  const existing = await env.SUB_KV.get("rule_profile:" + id);
+  if (existing) {
+    try { prev = JSON.parse(existing); } catch (e) {}
+  } else {
+    const foundDef = DEFAULT_RULE_PROFILES.find(p => p.id === id);
+    if (foundDef) prev = { ...foundDef };
+  }
+
+  const data = {
+    ...prev,
+    id,
+    name: body.name ? body.name.trim() : (prev.name || "自定义规则配置"),
+    description: body.description !== undefined ? body.description.trim() : (prev.description || ""),
+    domains: body.domains !== undefined ? parseInputList(body.domains) : (prev.domains || []),
+    ips: body.ips !== undefined ? parseInputList(body.ips) : (prev.ips || []),
+    packages: body.packages !== undefined ? parseInputList(body.packages) : (prev.packages || []),
+    updatedAt: new Date().toISOString()
+  };
+
+  await env.SUB_KV.put("rule_profile:" + id, JSON.stringify(data));
+  return new Response(JSON.stringify({ success: true, id, data }), { headers: corsHeaders });
+}
+
+async function handleApiRuleProfilesDelete(request, env, corsHeaders) {
+  if (!env.SUB_KV) {
+    return new Response(JSON.stringify({ error: "SUB_KV not bound" }), { status: 500, headers: corsHeaders });
+  }
+  const body = await request.json();
+  const id = (body.id || "").trim();
+  if (!id) {
+    return new Response(JSON.stringify({ error: "缺少规则配置 ID" }), { status: 400, headers: corsHeaders });
+  }
+  if (id === "none" || id === "default") {
+    return new Response(JSON.stringify({ error: "系统基础预置规则配置不可删除" }), { status: 400, headers: corsHeaders });
+  }
+
+  await env.SUB_KV.delete("rule_profile:" + id);
   return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
 }
 
@@ -1264,10 +1512,11 @@ function renderHtml(origin) {
       --border: #334155;
       --danger: #ef4444;
       --warning: #f59e0b;
+      --primary: #38bdf8;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
     body { background-color: var(--bg); color: var(--text); padding: 28px 16px; min-height: 100vh; display: flex; justify-content: center; }
-    .container { width: 100%; max-width: 900px; }
+    .container { width: 100%; max-width: 920px; }
     .header { text-align: center; margin-bottom: 28px; }
     .header h1 { font-size: 26px; color: var(--accent); margin-bottom: 8px; }
     .header p { color: var(--text-muted); font-size: 14px; }
@@ -1281,7 +1530,7 @@ function renderHtml(origin) {
     textarea { resize: vertical; min-height: 64px; font-family: monospace; font-size: 13px; }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
-    .btn { background: var(--accent); color: #000; font-weight: 600; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; }
+    .btn { background: var(--accent); color: #000; font-weight: 600; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
     .btn:hover { background: var(--accent-hover); }
     .btn-sm { padding: 6px 12px; font-size: 12px; }
     .btn-danger { background: var(--danger); color: #fff; }
@@ -1306,7 +1555,7 @@ function renderHtml(origin) {
       gap: 6px;
     }
 
-    .sub-item { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .sub-item, .profile-item { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
     .sub-header { display: flex; justify-content: space-between; align-items: center; }
     .sub-title { font-weight: 600; font-size: 16px; color: var(--accent); }
     .sub-url { word-break: break-all; font-family: monospace; font-size: 12px; color: #38bdf8; background: #1e293b; padding: 8px 12px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
@@ -1315,13 +1564,14 @@ function renderHtml(origin) {
     .meta-tag { font-size: 12px; color: var(--text-muted); word-break: break-all; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: #334155; color: #94a3b8; margin-right: 6px; }
     .badge-reject { background: #7f1d1d; color: #fca5a5; }
+    .badge-profile { background: #1e3a8a; color: #93c5fd; }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
       <h1>⚡ Sing-box 订阅托管转换中心</h1>
-      <p>Cloudflare 边缘极速生成 · KV 永久联动更新 · FakeIP 零延迟智能分流 · 自定义拦截审计</p>
+      <p>Cloudflare 边缘极速生成 · KV 永久联动更新 · 规则配置文件中心化管理 · 局域网共享代理 (0.0.0.0:2080)</p>
     </div>
 
     <!-- 创建新订阅 -->
@@ -1351,45 +1601,46 @@ function renderHtml(origin) {
         </div>
       </div>
 
-      <!-- 自定义拒绝与拦截规则面板 -->
-      <div class="rules-section">
-        <div class="rules-header">
-          🛡️ 自定义拒绝拦截规则 (Reject Rules)
-          <span class="label-hint" style="color: #94a3b8;">命中的流量将在 DNS 和路由层直接拒接 (Action: reject)；智能识别支持包名与域名混填、包名支持 * 通配符</span>
-        </div>
-        
-        <div class="grid-3">
-          <div class="form-group">
-            <label>拒绝域名 (Domain / Suffix)<span class="label-hint">每行一个，支持 *. 前缀</span></label>
-            <textarea id="rejectDomains" rows="6" placeholder="每行一个域名">*.pangolin-sdk-toutiao.com
-*.pglstatp-toutiao.com
-*.pangle-ads.com
-adservice.google.com
-app-measurement.com
-analytics.google.com
-*.umeng.com
-*.umengcloud.com
-*.open.e.kuaishou.com
-*.ad.xiaomi.com</textarea>
-          </div>
-          
-          <div class="form-group">
-            <label>拒绝 IP 地址段 (IP / CIDR)<span class="label-hint">每行一个或逗号分隔</span></label>
-            <textarea id="rejectIps" rows="6" placeholder="例如:&#10;123.56.78.90/32&#10;203.0.113.0/24"></textarea>
-          </div>
-
-          <div class="form-group">
-            <label>拒绝应用包名 / 进程名<span class="label-hint">安卓包名支持 * 通配符，电脑进程支持 .exe</span></label>
-            <textarea id="rejectPackages" rows="6" placeholder="例如:&#10;com.ss.android.*&#10;pinduoduo.exe">com.ss.android.*
-com.smile.gifmaker
-com.kuaishou.nebula
-com.xunmeng.pinduoduo
-pinduoduo.exe</textarea>
-          </div>
-        </div>
+      <!-- 关联规则配置文件 -->
+      <div class="form-group">
+        <label>🛡️ 关联拒绝拦截规则配置文件</label>
+        <select id="subRuleProfile" onchange="onRuleProfileChange('sub')">
+          <option value="">加载中...</option>
+        </select>
+        <div id="subProfileDesc" style="font-size: 12px; color: #38bdf8; margin-top: 6px;"></div>
       </div>
 
+      <!-- 可选高级独立自定义覆盖 -->
+      <details style="margin-bottom: 16px; background: #131d2e; border: 1px solid #1e3a5f; border-radius: 8px; padding: 12px 16px;">
+        <summary style="color: #94a3b8; cursor: pointer; font-size: 13px; font-weight: 500;">
+          ⚙️ 针对此订阅单独追加专属规则 (可选，留空则完全以所选配置文件为准) ▾
+        </summary>
+        <div class="grid-3" style="margin-top: 12px;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>追加拒绝域名<span class="label-hint">每行一个</span></label>
+            <textarea id="rejectDomains" rows="4" placeholder="例如:&#10;*.ad.example.com"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>追加拒绝 IP/CIDR<span class="label-hint">每行一个</span></label>
+            <textarea id="rejectIps" rows="4" placeholder="例如:&#10;123.56.78.90/32"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>追加拒绝包名/进程<span class="label-hint">支持 * 通配符</span></label>
+            <textarea id="rejectPackages" rows="4" placeholder="例如:&#10;com.bad.app.*&#10;bad.exe"></textarea>
+          </div>
+        </div>
+      </details>
+
       <button class="btn" onclick="createSub()">⚡ 生成永久专属订阅地址</button>
+    </div>
+
+    <!-- 规则配置文件管理 -->
+    <div class="card">
+      <h2>
+        <span>🛡️ 拒绝拦截规则配置文件 (Rule Profiles)</span>
+        <button class="btn btn-sm" onclick="openCreateRuleProfile()">➕ 新建规则配置</button>
+      </h2>
+      <div id="ruleProfileList">正在读取规则配置...</div>
     </div>
 
     <!-- 订阅列表 -->
@@ -1402,12 +1653,286 @@ pinduoduo.exe</textarea>
     </div>
   </div>
 
+  <!-- 编辑订阅弹窗 -->
+  <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:999;align-items:center;justify-content:center;">
+    <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:100%;max-width:640px;max-height:90vh;overflow-y:auto;position:relative;">
+      <h2 style="font-size:18px;margin-bottom:20px;color:#10b981;">✏️ 编辑订阅 &nbsp;<span id="editId" style="font-size:13px;color:#94a3b8;font-weight:400;"></span></h2>
+
+      <div class="form-group">
+        <label>备注名称</label>
+        <input type="text" id="editName">
+      </div>
+      <div class="form-group">
+        <label>原订阅地址</label>
+        <input type="text" id="editSourceUrl">
+      </div>
+      <div class="form-group">
+        <label>目标版本</label>
+        <select id="editTargetVersion">
+          <option value="1.15" selected>Sing-box 1.15+</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>🛡️ 关联拒绝拦截规则配置文件</label>
+        <select id="editRuleProfile" onchange="onRuleProfileChange('edit')"></select>
+        <div id="editProfileDesc" style="font-size: 12px; color: #38bdf8; margin-top: 6px;"></div>
+      </div>
+
+      <details style="margin-bottom: 16px; background: #131d2e; border: 1px solid #1e3a5f; border-radius: 8px; padding: 12px 16px;">
+        <summary style="color: #94a3b8; cursor: pointer; font-size: 13px; font-weight: 500;">
+          ⚙️ 单独追加专属规则 (可选覆盖) ▾
+        </summary>
+        <div class="grid-3" style="margin-top: 12px;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>追加域名<span class="label-hint">每行一个</span></label>
+            <textarea id="editRejectDomains" rows="4"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>追加 IP/CIDR<span class="label-hint">每行一个</span></label>
+            <textarea id="editRejectIps" rows="4"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>追加包名/进程<span class="label-hint">支持 * 通配符</span></label>
+            <textarea id="editRejectPackages" rows="4"></textarea>
+          </div>
+        </div>
+      </details>
+
+      <div style="display:flex;gap:12px;margin-top:12px;">
+        <button id="editSaveBtn" class="btn" onclick="saveEdit()">💾 保存</button>
+        <button class="btn btn-secondary" onclick="closeEdit()">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 规则配置文件编辑/创建弹窗 -->
+  <div id="ruleProfileModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:100%;max-width:700px;max-height:92vh;overflow-y:auto;position:relative;">
+      <h2 style="font-size:18px;margin-bottom:20px;color:#38bdf8;" id="rpmTitle">🛡️ 规则配置文件</h2>
+      
+      <div class="grid-2">
+        <div class="form-group">
+          <label>配置 ID <span class="label-hint">(小写字母/数字/下划线)</span></label>
+          <input type="text" id="rpmId" placeholder="例如: work_clean">
+        </div>
+        <div class="form-group">
+          <label>配置名称</label>
+          <input type="text" id="rpmName" placeholder="例如: 办公深度防干扰">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>说明备注</label>
+        <input type="text" id="rpmDesc" placeholder="简述该规则配置的应用场景与目标">
+      </div>
+
+      <div class="rules-section">
+        <div class="rules-header">🛡️ 规则拦截清单 (自动智能识别分流；包名支持 * 通配符)</div>
+        <div class="grid-3">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>拒绝域名 (Domain / Suffix)<span class="label-hint">支持 *. 前缀</span></label>
+            <textarea id="rpmDomains" rows="8" placeholder="*.pangolin-sdk-toutiao.com&#10;adservice.google.com"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>拒绝 IP / CIDR<span class="label-hint">每行一个</span></label>
+            <textarea id="rpmIps" rows="8" placeholder="123.56.78.90/32"></textarea>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>拒绝包名 / 进程<span class="label-hint">支持 * 通配符与 .exe</span></label>
+            <textarea id="rpmPackages" rows="8" placeholder="com.ss.android.*&#10;pinduoduo.exe"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px;margin-top:16px;">
+        <button id="rpmSaveBtn" class="btn" onclick="saveRuleProfile()">💾 保存规则配置</button>
+        <button class="btn btn-secondary" onclick="closeRuleProfileModal()">取消</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const origin = window.location.origin;
+    let _ruleProfiles = [];
+    let _editingSubId = null;
+    let _isEditingProfile = false;
+
+    // ---- 规则配置文件加载与管理 ----
+
+    async function loadRuleProfiles() {
+      const container = document.getElementById('ruleProfileList');
+      try {
+        const res = await fetch('/api/rule_profiles/list');
+        const data = await res.json();
+        _ruleProfiles = data.items || [];
+        renderRuleProfilesList();
+        populateProfileDropdowns();
+      } catch (e) {
+        container.innerHTML = '<div style="color: #f87171;">加载规则配置失败: ' + e.message + '</div>';
+      }
+    }
+
+    function renderRuleProfilesList() {
+      const container = document.getElementById('ruleProfileList');
+      if (!_ruleProfiles || _ruleProfiles.length === 0) {
+        container.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 16px;">暂无规则配置文件</div>';
+        return;
+      }
+      container.innerHTML = '';
+      _ruleProfiles.forEach(p => {
+        const domainCount = (p.domains || []).length;
+        const ipCount = (p.ips || []).length;
+        const pkgCount = (p.packages || []).length;
+
+        const isSystem = (p.id === 'none' || p.id === 'default');
+        const div = document.createElement('div');
+        div.className = 'profile-item';
+        div.innerHTML =
+          '<div class="sub-header">' +
+            '<div>' +
+              '<span class="sub-title" style="color: #38bdf8;">' + (p.name || p.id) + '</span> ' +
+              '<span class="badge">ID: ' + p.id + '</span> ' +
+              '<span class="badge badge-profile">' + domainCount + ' 域名</span> ' +
+              '<span class="badge badge-profile">' + pkgCount + ' 包名/进程</span> ' +
+              (ipCount ? '<span class="badge badge-profile">' + ipCount + ' IP</span> ' : '') +
+            '</div>' +
+            '<div style="display:flex;gap:6px;">' +
+              '<button class="btn btn-sm btn-secondary btn-edit-rp" data-id="' + p.id + '">✏️ 编辑规则</button>' +
+              (!isSystem ? '<button class="btn btn-sm btn-danger btn-del-rp" data-id="' + p.id + '">删除</button>' : '') +
+            '</div>' +
+          '</div>' +
+          '<div class="meta-tag">' + (p.description || '无描述说明') + '</div>';
+
+        div.querySelector('.btn-edit-rp').addEventListener('click', () => editRuleProfile(p.id));
+        const delBtn = div.querySelector('.btn-del-rp');
+        if (delBtn) delBtn.addEventListener('click', () => deleteRuleProfile(p.id));
+
+        container.appendChild(div);
+      });
+    }
+
+    function populateProfileDropdowns() {
+      const subSel = document.getElementById('subRuleProfile');
+      const editSel = document.getElementById('editRuleProfile');
+      let html = '';
+      _ruleProfiles.forEach(p => {
+        const countStr = ((p.domains||[]).length + (p.packages||[]).length) > 0 ? (' (' + (p.domains||[]).length + ' 域名, ' + (p.packages||[]).length + ' 包名)') : ' (无拦截)';
+        html += '<option value="' + p.id + '">' + p.name + countStr + '</option>';
+      });
+      subSel.innerHTML = html;
+      editSel.innerHTML = html;
+      subSel.value = 'default';
+      onRuleProfileChange('sub');
+    }
+
+    function onRuleProfileChange(target) {
+      const sel = document.getElementById(target === 'edit' ? 'editRuleProfile' : 'subRuleProfile');
+      const descEl = document.getElementById(target === 'edit' ? 'editProfileDesc' : 'subProfileDesc');
+      const p = _ruleProfiles.find(i => i.id === sel.value);
+      if (p) {
+        descEl.textContent = '💡 ' + (p.description || '已关联该规则配置文件');
+      } else {
+        descEl.textContent = '';
+      }
+    }
+
+    function openCreateRuleProfile() {
+      _isEditingProfile = false;
+      document.getElementById('rpmTitle').textContent = '➕ 新建规则配置文件';
+      document.getElementById('rpmId').value = '';
+      document.getElementById('rpmId').disabled = false;
+      document.getElementById('rpmName').value = '';
+      document.getElementById('rpmDesc').value = '';
+      document.getElementById('rpmDomains').value = '';
+      document.getElementById('rpmIps').value = '';
+      document.getElementById('rpmPackages').value = '';
+      document.getElementById('ruleProfileModal').style.display = 'flex';
+    }
+
+    function editRuleProfile(id) {
+      const p = _ruleProfiles.find(i => i.id === id);
+      if (!p) return;
+      _isEditingProfile = true;
+      document.getElementById('rpmTitle').textContent = '✏️ 编辑规则配置文件: ' + (p.name || id);
+      document.getElementById('rpmId').value = p.id;
+      document.getElementById('rpmId').disabled = true;
+      document.getElementById('rpmName').value = p.name || '';
+      document.getElementById('rpmDesc').value = p.description || '';
+      document.getElementById('rpmDomains').value = (p.domains || []).join('\\n');
+      document.getElementById('rpmIps').value = (p.ips || []).join('\\n');
+      document.getElementById('rpmPackages').value = (p.packages || []).join('\\n');
+      document.getElementById('ruleProfileModal').style.display = 'flex';
+    }
+
+    function closeRuleProfileModal() {
+      document.getElementById('ruleProfileModal').style.display = 'none';
+    }
+
+    async function saveRuleProfile() {
+      const btn = document.getElementById('rpmSaveBtn');
+      const id = document.getElementById('rpmId').value.trim();
+      const name = document.getElementById('rpmName').value.trim();
+      const description = document.getElementById('rpmDesc').value.trim();
+      const domains = document.getElementById('rpmDomains').value;
+      const ips = document.getElementById('rpmIps').value;
+      const packages = document.getElementById('rpmPackages').value;
+
+      if (!id) { alert('请输入规则配置 ID'); return; }
+      if (!name) { alert('请输入规则配置名称'); return; }
+
+      btn.disabled = true;
+      btn.textContent = '保存中...';
+
+      try {
+        const endpoint = _isEditingProfile ? '/api/rule_profiles/update' : '/api/rule_profiles/create';
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, name, description, domains, ips, packages })
+        });
+        const ret = await res.json();
+        if (ret.success) {
+          closeRuleProfileModal();
+          await loadRuleProfiles();
+          loadSubs();
+          alert('✅ 规则配置文件保存成功！所有关联此配置的订阅均已自动更新生效。');
+        } else {
+          alert('保存失败: ' + (ret.error || '未知错误'));
+        }
+      } catch (e) {
+        alert('保存异常: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '💾 保存规则配置';
+      }
+    }
+
+    async function deleteRuleProfile(id) {
+      if (!confirm('确定要删除规则配置 [' + id + '] 吗？')) return;
+      try {
+        const res = await fetch('/api/rule_profiles/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id })
+        });
+        const ret = await res.json();
+        if (ret.success) {
+          await loadRuleProfiles();
+          alert('已删除该规则配置');
+        } else {
+          alert('删除失败: ' + (ret.error || '未知错误'));
+        }
+      } catch (e) {
+        alert('删除异常: ' + e.message);
+      }
+    }
+
+    // ---- 订阅列表与管理 ----
 
     async function loadSubs() {
       const container = document.getElementById('subList');
-      container.innerHTML = '正在读取 KV 数据...';
+      container.innerHTML = '正在读取订阅数据...';
       try {
         const res = await fetch('/api/list');
         const data = await res.json();
@@ -1422,19 +1947,13 @@ pinduoduo.exe</textarea>
         container.innerHTML = '';
         data.items.forEach(item => {
           const clientUrl = origin + '/sub/' + item.id;
-          const rules = item.rejectRules || {};
-          const domainCount = (rules.domains || []).length;
-          const ipCount = (rules.ips || []).length;
-          const pkgCount = (rules.packages || []).length;
+          const pid = item.ruleProfileId || 'default';
+          const p = _ruleProfiles.find(i => i.id === pid);
+          const pName = p ? p.name : pid;
 
-          let rejectBadges = '';
-          if (domainCount > 0 || ipCount > 0 || pkgCount > 0) {
-            rejectBadges = '<span class="badge badge-reject">已拦截: ' +
-              (domainCount ? domainCount + ' 域名 ' : '') +
-              (ipCount ? ipCount + ' IP ' : '') +
-              (pkgCount ? pkgCount + ' 应用/进程' : '') +
-              '</span>';
-          }
+          const rules = item.rejectRules || {};
+          const extraCount = (rules.domains||[]).length + (rules.ips||[]).length + (rules.packages||[]).length;
+          const extraBadge = extraCount > 0 ? ('<span class="badge" style="background:#0284c7;color:#fff;">+额外规则 (' + extraCount + ')</span> ') : '';
 
           const div = document.createElement('div');
           div.className = 'sub-item';
@@ -1445,7 +1964,8 @@ pinduoduo.exe</textarea>
                 '<span class="sub-title">' + (item.name || '未命名') + '</span> ' +
                 '<span class="badge">ID: ' + item.id + '</span> ' +
                 '<span class="badge">v' + (item.targetVersion || '1.15') + '</span> ' +
-                rejectBadges +
+                '<span class="badge badge-reject">🛡️ 规则配置: ' + pName + '</span> ' +
+                extraBadge +
               '</div>' +
               '<div style="display:flex;gap:6px;">' +
                 '<button class="btn btn-sm btn-secondary btn-edit" data-id="' + item.id + '">✏️ 编辑</button>' +
@@ -1475,6 +1995,7 @@ pinduoduo.exe</textarea>
       const sourceUrl = document.getElementById('sourceUrl').value.trim();
       const id = document.getElementById('subId').value.trim();
       const targetVersion = document.getElementById('targetVersion').value || '1.15';
+      const ruleProfileId = document.getElementById('subRuleProfile').value || 'default';
       const rejectDomains = document.getElementById('rejectDomains').value;
       const rejectIps = document.getElementById('rejectIps').value;
       const rejectPackages = document.getElementById('rejectPackages').value;
@@ -1489,7 +2010,7 @@ pinduoduo.exe</textarea>
         const res = await fetch('/api/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, sourceUrl, id, targetVersion, rejectDomains, rejectIps, rejectPackages })
+          body: JSON.stringify({ name, sourceUrl, id, targetVersion, ruleProfileId, rejectDomains, rejectIps, rejectPackages })
         });
         const ret = await res.json();
         if (ret.success) {
@@ -1497,6 +2018,9 @@ pinduoduo.exe</textarea>
           alert('🎉 创建成功！专属订阅地址已生成并绑定。' + fileMsg);
           document.getElementById('sourceUrl').value = '';
           document.getElementById('subId').value = '';
+          document.getElementById('rejectDomains').value = '';
+          document.getElementById('rejectIps').value = '';
+          document.getElementById('rejectPackages').value = '';
           loadSubs();
         } else {
           if (ret.error && ret.error.includes('SUB_KV')) {
@@ -1513,22 +2037,20 @@ pinduoduo.exe</textarea>
       }
     }
 
-    // ---- 编辑订阅 ----
-    let _editingId = null;
-
     async function editSub(id) {
-      // 先获取当前数据
       const res = await fetch('/api/list');
       const data = await res.json();
       const item = (data.items || []).find(i => i.id === id);
       if (!item) { alert('未找到订阅'); return; }
 
-      _editingId = id;
+      _editingSubId = id;
       const rules = item.rejectRules || {};
       document.getElementById('editId').textContent = id;
       document.getElementById('editName').value = item.name || '';
       document.getElementById('editSourceUrl').value = item.sourceUrl || '';
       document.getElementById('editTargetVersion').value = item.targetVersion || '1.15';
+      document.getElementById('editRuleProfile').value = item.ruleProfileId || 'default';
+      onRuleProfileChange('edit');
       document.getElementById('editRejectDomains').value = (rules.domains || []).join('\\n');
       document.getElementById('editRejectIps').value = (rules.ips || []).join('\\n');
       document.getElementById('editRejectPackages').value = (rules.packages || []).join('\\n');
@@ -1537,11 +2059,11 @@ pinduoduo.exe</textarea>
 
     function closeEdit() {
       document.getElementById('editModal').style.display = 'none';
-      _editingId = null;
+      _editingSubId = null;
     }
 
     async function saveEdit() {
-      if (!_editingId) return;
+      if (!_editingSubId) return;
       const btn = document.getElementById('editSaveBtn');
       btn.disabled = true;
       btn.textContent = '保存中...';
@@ -1550,10 +2072,11 @@ pinduoduo.exe</textarea>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            id: _editingId,
+            id: _editingSubId,
             name: document.getElementById('editName').value.trim(),
             sourceUrl: document.getElementById('editSourceUrl').value.trim(),
             targetVersion: document.getElementById('editTargetVersion').value || '1.15',
+            ruleProfileId: document.getElementById('editRuleProfile').value || 'default',
             rejectDomains: document.getElementById('editRejectDomains').value,
             rejectIps: document.getElementById('editRejectIps').value,
             rejectPackages: document.getElementById('editRejectPackages').value
@@ -1568,7 +2091,7 @@ pinduoduo.exe</textarea>
         } else {
           alert('保存失败: ' + (ret.error || '未知错误'));
         }
-      } catch(e) {
+      } catch (e) {
         alert('保存失败: ' + e.message);
       } finally {
         btn.disabled = false;
@@ -1590,53 +2113,9 @@ pinduoduo.exe</textarea>
       navigator.clipboard.writeText(text).then(() => { alert('已复制客户端订阅地址到剪贴板！'); });
     }
 
-    loadSubs();
+    // 初始化加载
+    loadRuleProfiles().then(() => loadSubs());
   </script>
-
-  <!-- 编辑弹窗 -->
-  <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999;align-items:center;justify-content:center;">
-    <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:100%;max-width:620px;max-height:90vh;overflow-y:auto;position:relative;">
-      <h2 style="font-size:18px;margin-bottom:20px;color:#10b981;">✏️ 编辑订阅 &nbsp;<span id="editId" style="font-size:13px;color:#94a3b8;font-weight:400;"></span></h2>
-
-      <div class="form-group">
-        <label>备注名称</label>
-        <input type="text" id="editName">
-      </div>
-      <div class="form-group">
-        <label>原订阅地址</label>
-        <input type="text" id="editSourceUrl">
-      </div>
-      <div class="form-group">
-        <label>目标版本</label>
-        <select id="editTargetVersion">
-          <option value="1.15" selected>Sing-box 1.15+</option>
-        </select>
-      </div>
-
-      <div class="rules-section">
-        <div class="rules-header">🛡️ 自定义拒绝拦截规则</div>
-        <div class="grid-3">
-          <div class="form-group">
-            <label>拒绝域名<span class="label-hint">每行一个</span></label>
-            <textarea id="editRejectDomains" placeholder="tiktok.com&#10;douyin.com&#10;*.pinduoduo.com"></textarea>
-          </div>
-          <div class="form-group">
-            <label>拒绝 IP/CIDR<span class="label-hint">每行一个</span></label>
-            <textarea id="editRejectIps" placeholder="123.56.78.90/32&#10;203.0.113.0/24"></textarea>
-          </div>
-          <div class="form-group">
-            <label>拒绝包名/进程<span class="label-hint">每行一个</span></label>
-            <textarea id="editRejectPackages" placeholder="com.ss.android.ugc.aweme&#10;douyin.exe"></textarea>
-          </div>
-        </div>
-      </div>
-
-      <div style="display:flex;gap:12px;margin-top:8px;">
-        <button id="editSaveBtn" class="btn" onclick="saveEdit()">💾 保存</button>
-        <button class="btn btn-secondary" onclick="closeEdit()">取消</button>
-      </div>
-    </div>
-  </div>
 </body>
 </html>`;
 }

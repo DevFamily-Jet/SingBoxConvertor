@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import signal
 import urllib.parse
+import re
+from datetime import datetime, timezone
 
 PORT = 8787
 socketserver.TCPServer.allow_reuse_address = True
@@ -37,9 +39,129 @@ def save_kv_to_disk():
     except Exception as e:
         print(f"[Warn] 保存 KV 存储文件失败: {e}")
 
+def parse_input_list(val):
+    if not val:
+        return []
+    if isinstance(val, list):
+        items = []
+        for x in val:
+            items.extend(parse_input_list(x))
+        return items
+    raw = str(val).replace("\\n", "\n")
+    tokens = re.split(r"[\s,\r\n]+", raw)
+    return [t.strip() for t in tokens if t.strip()]
+
+DEFAULT_RULE_PROFILES = {
+    "rule_profile:default": json.dumps({
+        "id": "default",
+        "name": "默认基础拦截 (广告SDK / 追踪 / 短视频)",
+        "description": "拦截主流广告追踪联盟、开屏SDK及短视频后台数据同步",
+        "domains": [
+            "*.pangolin-sdk-toutiao.com",
+            "*.pglstatp-toutiao.com",
+            "*.pangle-ads.com",
+            "adservice.google.com",
+            "app-measurement.com",
+            "analytics.google.com",
+            "*.umeng.com",
+            "*.umengcloud.com",
+            "*.open.e.kuaishou.com",
+            "*.ad.xiaomi.com"
+        ],
+        "ips": [],
+        "packages": [
+            "com.ss.android.*",
+            "com.smile.gifmaker",
+            "com.kuaishou.nebula",
+            "com.xunmeng.pinduoduo",
+            "pinduoduo.exe"
+        ],
+        "updatedAt": "2026-09-26T10:00:00.000Z"
+    }, ensure_ascii=False),
+    "rule_profile:strict": json.dumps({
+        "id": "strict",
+        "name": "强力隐私防护 (含大数据埋点与厂商遥测)",
+        "description": "在默认规则基础上，额外拦截设备指纹收集、用户行为埋点上报及国内厂商遥测",
+        "domains": [
+            "*.pangolin-sdk-toutiao.com",
+            "*.pglstatp-toutiao.com",
+            "*.pangle-ads.com",
+            "adservice.google.com",
+            "app-measurement.com",
+            "analytics.google.com",
+            "*.umeng.com",
+            "*.umengcloud.com",
+            "*.open.e.kuaishou.com",
+            "*.ad.xiaomi.com",
+            "*.sensorsdata.cn",
+            "*.talkingdata.net",
+            "*.growingio.com",
+            "*.trackingio.com",
+            "log.byteoversea.com",
+            "*.data.bilibili.com"
+        ],
+        "ips": [],
+        "packages": [
+            "com.ss.android.*",
+            "com.smile.gifmaker",
+            "com.kuaishou.nebula",
+            "com.xunmeng.pinduoduo",
+            "pinduoduo.exe",
+            "com.tencent.tmgp.*",
+            "com.miui.analytics",
+            "com.vivo.pushservice"
+        ],
+        "updatedAt": "2026-09-26T10:00:00.000Z"
+    }, ensure_ascii=False),
+    "rule_profile:none": json.dumps({
+        "id": "none",
+        "name": "直通无拦截 (None)",
+        "description": "不执行任何自定义 reject 规则，所有流量按基础分流直连或代理",
+        "domains": [],
+        "ips": [],
+        "packages": [],
+        "updatedAt": "2026-09-26T10:00:00.000Z"
+    }, ensure_ascii=False)
+}
+
+def resolve_sub_rules(sub_info):
+    pid = sub_info.get("ruleProfileId", "default")
+    domains = []
+    ips = []
+    packages = []
+    if pid != "none":
+        praw = mock_kv.get(f"rule_profile:{pid}")
+        if praw:
+            try:
+                pobj = json.loads(praw)
+                domains = list(pobj.get("domains", []))
+                ips = list(pobj.get("ips", []))
+                packages = list(pobj.get("packages", []))
+            except Exception:
+                pass
+        else:
+            praw = DEFAULT_RULE_PROFILES.get("rule_profile:default")
+            if praw:
+                try:
+                    pobj = json.loads(praw)
+                    domains = list(pobj.get("domains", []))
+                    ips = list(pobj.get("ips", []))
+                    packages = list(pobj.get("packages", []))
+                except Exception:
+                    pass
+    # 合并订阅内可能单独指定的规则
+    extra = sub_info.get("rejectRules", {})
+    domains.extend(extra.get("domains", []))
+    ips.extend(extra.get("ips", []))
+    packages.extend(extra.get("packages", []))
+    return {
+        "domains": [d for d in domains if d],
+        "ips": [i for i in ips if i],
+        "packages": [p for p in packages if p]
+    }
+
 def load_kv_from_disk():
     global mock_kv
-    # 如果旧位置在项目目录内存在文件，自动安全迁移至系统用户数据目录，避免误提交云端
     old_file = os.path.join(r"z:\SingBoxConvertor", "dev_kv_store.json")
     if os.path.exists(old_file) and not os.path.exists(KV_STORE_FILE):
         try:
@@ -61,72 +183,39 @@ def load_kv_from_disk():
                 mock_kv = json.load(f)
                 if mock_kv:
                     updated = False
+                    for rk, rv in DEFAULT_RULE_PROFILES.items():
+                        if rk not in mock_kv:
+                            mock_kv[rk] = rv
+                            updated = True
                     for k, v in list(mock_kv.items()):
-                        try:
-                            obj = json.loads(v)
-                            if obj.get("targetVersion") == "1.14":
-                                obj["targetVersion"] = "1.15"
-                                updated = True
-                            rules = obj.get("rejectRules", {})
-                            if not rules.get("domains") and not rules.get("packages"):
-                                rules["domains"] = [
-                                    "*.pangolin-sdk-toutiao.com",
-                                    "*.pglstatp-toutiao.com",
-                                    "*.pangle-ads.com",
-                                    "adservice.google.com",
-                                    "app-measurement.com",
-                                    "analytics.google.com",
-                                    "*.umeng.com",
-                                    "*.umengcloud.com",
-                                    "*.open.e.kuaishou.com",
-                                    "*.ad.xiaomi.com"
-                                ]
-                                rules["packages"] = [
-                                    "com.ss.android.*",
-                                    "com.smile.gifmaker",
-                                    "com.kuaishou.nebula",
-                                    "com.xunmeng.pinduoduo",
-                                    "pinduoduo.exe"
-                                ]
-                                obj["rejectRules"] = rules
-                                updated = True
-                            mock_kv[k] = json.dumps(obj, ensure_ascii=False)
-                        except Exception:
-                            pass
+                        if k.startswith("sub:"):
+                            try:
+                                obj = json.loads(v)
+                                if "ruleProfileId" not in obj:
+                                    obj["ruleProfileId"] = "default"
+                                    updated = True
+                                if obj.get("targetVersion") == "1.14":
+                                    obj["targetVersion"] = "1.15"
+                                    updated = True
+                                mock_kv[k] = json.dumps(obj, ensure_ascii=False)
+                            except Exception:
+                                pass
                     if updated:
                         save_kv_to_disk()
                     return
         except Exception:
             pass
+
     # 初始默认数据
     mock_kv = {
+        **DEFAULT_RULE_PROFILES,
         "sub:99": json.dumps({
             "sourceUrl": "https://js.ebox.de5.net/jsh/sub?target=clash",
             "name": "主力机场 (99)",
             "targetVersion": "1.15",
             "enableTun": True,
-            "rejectRules": {
-                "domains": [
-                    "*.pangolin-sdk-toutiao.com",
-                    "*.pglstatp-toutiao.com",
-                    "*.pangle-ads.com",
-                    "adservice.google.com",
-                    "app-measurement.com",
-                    "analytics.google.com",
-                    "*.umeng.com",
-                    "*.umengcloud.com",
-                    "*.open.e.kuaishou.com",
-                    "*.ad.xiaomi.com"
-                ],
-                "ips": [],
-                "packages": [
-                    "com.ss.android.*",
-                    "com.smile.gifmaker",
-                    "com.kuaishou.nebula",
-                    "com.xunmeng.pinduoduo",
-                    "pinduoduo.exe"
-                ]
-            },
+            "ruleProfileId": "default",
+            "rejectRules": {"domains": [], "ips": [], "packages": []},
             "updatedAt": "2026-09-26T03:13:00.000Z"
         }, ensure_ascii=False),
         "sub:sample-sub": json.dumps({
@@ -134,28 +223,8 @@ def load_kv_from_disk():
             "name": "示例主力机场 (含拦截规则)",
             "targetVersion": "1.15",
             "enableTun": True,
-            "rejectRules": {
-                "domains": [
-                    "*.pangolin-sdk-toutiao.com",
-                    "*.pglstatp-toutiao.com",
-                    "*.pangle-ads.com",
-                    "adservice.google.com",
-                    "app-measurement.com",
-                    "analytics.google.com",
-                    "*.umeng.com",
-                    "*.umengcloud.com",
-                    "*.open.e.kuaishou.com",
-                    "*.ad.xiaomi.com"
-                ],
-                "ips": ["123.56.78.90/32"],
-                "packages": [
-                    "com.ss.android.*",
-                    "com.smile.gifmaker",
-                    "com.kuaishou.nebula",
-                    "com.xunmeng.pinduoduo",
-                    "pinduoduo.exe"
-                ]
-            },
+            "ruleProfileId": "default",
+            "rejectRules": {"domains": [], "ips": [], "packages": []},
             "updatedAt": "2026-09-26T06:30:00.000Z"
         }, ensure_ascii=False)
     }
@@ -217,7 +286,7 @@ sandbox.convertFromUrl(input.sourceUrl, {
             "sourceUrl": source_url,
             "targetVersion": sub_info.get("targetVersion", "1.15"),
             "enableTun": sub_info.get("enableTun", True),
-            "rejectRules": sub_info.get("rejectRules", {})
+            "rejectRules": resolve_sub_rules(sub_info)
         })
 
         proc = subprocess.run(
@@ -310,6 +379,30 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.end_headers()
             self.wfile.write(json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"))
+        elif req_path == "/api/rule_profiles/list":
+            items = []
+            found_ids = set()
+            for k, v in mock_kv.items():
+                if k.startswith("rule_profile:"):
+                    try:
+                        obj = json.loads(v)
+                        pid = k.replace("rule_profile:", "")
+                        items.append({"id": pid, **obj})
+                        found_ids.add(pid)
+                    except Exception:
+                        pass
+            for rk, rv in DEFAULT_RULE_PROFILES.items():
+                pid = rk.replace("rule_profile:", "")
+                if pid not in found_ids:
+                    try:
+                        pobj = json.loads(rv)
+                        items.append({"id": pid, **pobj})
+                    except Exception:
+                        pass
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"))
         elif req_path.startswith("/sub/"):
             sub_id = req_path[5:].strip()
             raw_entry = mock_kv.get(f"sub:{sub_id}")
@@ -350,6 +443,7 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 "sourceUrl": source_url,
                 "targetVersion": query_params.get("version", ["1.15"])[0],
                 "enableTun": query_params.get("tun", ["true"])[0].lower() != "false",
+                "ruleProfileId": query_params.get("profile", ["default"])[0],
                 "rejectRules": {}
             }
             config_json, _, err = run_conversion_and_save("temp_convert", convert_info)
@@ -373,17 +467,19 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
         
         if self.path == "/api/create":
             sub_id = (body.get("id") or "sub_" + os.urandom(3).hex()).strip()
+            rule_profile_id = body.get("ruleProfileId") or "default"
             sub_info = {
                 "sourceUrl": body.get("sourceUrl"),
                 "name": body.get("name") or "未命名订阅",
                 "targetVersion": body.get("targetVersion", "1.15"),
                 "enableTun": body.get("enableTun", True),
+                "ruleProfileId": rule_profile_id,
                 "rejectRules": {
-                    "domains": [s.strip() for s in body.get("rejectDomains", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
-                    "ips": [s.strip() for s in body.get("rejectIps", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
-                    "packages": [s.strip() for s in body.get("rejectPackages", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()]
+                    "domains": parse_input_list(body.get("rejectDomains")),
+                    "ips": parse_input_list(body.get("rejectIps")),
+                    "packages": parse_input_list(body.get("rejectPackages"))
                 },
-                "updatedAt": "2026-09-26T03:30:00.000Z"
+                "updatedAt": datetime.now(timezone.utc).isoformat()
             }
             mock_kv[f"sub:{sub_id}"] = json.dumps(sub_info, ensure_ascii=False)
             save_kv_to_disk()
@@ -404,17 +500,24 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             sub_id = (body.get("id") or "").strip()
             if f"sub:{sub_id}" in mock_kv:
                 prev = json.loads(mock_kv[f"sub:{sub_id}"])
+                rule_profile_id = body.get("ruleProfileId") if "ruleProfileId" in body else prev.get("ruleProfileId", "default")
+                
+                reject_domains = parse_input_list(body.get("rejectDomains")) if "rejectDomains" in body else prev.get("rejectRules", {}).get("domains", [])
+                reject_ips = parse_input_list(body.get("rejectIps")) if "rejectIps" in body else prev.get("rejectRules", {}).get("ips", [])
+                reject_packages = parse_input_list(body.get("rejectPackages")) if "rejectPackages" in body else prev.get("rejectRules", {}).get("packages", [])
+
                 sub_info = {
                     "sourceUrl": body.get("sourceUrl") or prev.get("sourceUrl"),
                     "name": body.get("name") or prev.get("name"),
                     "targetVersion": body.get("targetVersion") or prev.get("targetVersion", "1.15"),
-                    "enableTun": prev.get("enableTun", True),
+                    "enableTun": body.get("enableTun") if "enableTun" in body else prev.get("enableTun", True),
+                    "ruleProfileId": rule_profile_id,
                     "rejectRules": {
-                        "domains": [s.strip() for s in body.get("rejectDomains", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
-                        "ips": [s.strip() for s in body.get("rejectIps", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()],
-                        "packages": [s.strip() for s in body.get("rejectPackages", "").replace("\\n", "\n").replace("\n", ",").split(",") if s.strip()]
+                        "domains": reject_domains,
+                        "ips": reject_ips,
+                        "packages": reject_packages
                     },
-                    "updatedAt": "2026-09-26T03:30:00.000Z"
+                    "updatedAt": datetime.now(timezone.utc).isoformat()
                 }
                 mock_kv[f"sub:{sub_id}"] = json.dumps(sub_info, ensure_ascii=False)
                 save_kv_to_disk()
@@ -441,6 +544,110 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             sub_id = (body.get("id") or "").strip()
             if f"sub:{sub_id}" in mock_kv:
                 del mock_kv[f"sub:{sub_id}"]
+                save_kv_to_disk()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True}, ensure_ascii=False).encode("utf-8"))
+
+        elif self.path == "/api/rule_profiles/create":
+            pid = (body.get("id") or "rule_" + os.urandom(3).hex()).strip().lower()
+            pid = re.sub(r"[^a-z0-9_-]", "", pid)
+            if not pid:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "规则配置 ID 格式无效"}, ensure_ascii=False).encode("utf-8"))
+                return
+            if f"rule_profile:{pid}" in mock_kv:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "该规则配置 ID 已存在，请更换"}, ensure_ascii=False).encode("utf-8"))
+                return
+            data = {
+                "id": pid,
+                "name": (body.get("name") or "自定义规则配置").strip(),
+                "description": (body.get("description") or "").strip(),
+                "domains": parse_input_list(body.get("domains")),
+                "ips": parse_input_list(body.get("ips")),
+                "packages": parse_input_list(body.get("packages")),
+                "updatedAt": datetime.now(timezone.utc).isoformat()
+            }
+            mock_kv[f"rule_profile:{pid}"] = json.dumps(data, ensure_ascii=False)
+            save_kv_to_disk()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "id": pid, "data": data}, ensure_ascii=False).encode("utf-8"))
+
+        elif self.path == "/api/rule_profiles/update":
+            pid = (body.get("id") or "").strip()
+            if not pid:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "缺少规则配置 ID"}, ensure_ascii=False).encode("utf-8"))
+                return
+            prev = {}
+            if f"rule_profile:{pid}" in mock_kv:
+                try:
+                    prev = json.loads(mock_kv[f"rule_profile:{pid}"])
+                except Exception:
+                    pass
+            elif f"rule_profile:{pid}" in DEFAULT_RULE_PROFILES:
+                try:
+                    prev = json.loads(DEFAULT_RULE_PROFILES[f"rule_profile:{pid}"])
+                except Exception:
+                    pass
+
+            data = {
+                **prev,
+                "id": pid,
+                "name": (body.get("name") or prev.get("name") or "自定义规则配置").strip(),
+                "description": (body.get("description") if "description" in body else prev.get("description", "")).strip(),
+                "domains": parse_input_list(body.get("domains")) if "domains" in body else prev.get("domains", []),
+                "ips": parse_input_list(body.get("ips")) if "ips" in body else prev.get("ips", []),
+                "packages": parse_input_list(body.get("packages")) if "packages" in body else prev.get("packages", []),
+                "updatedAt": datetime.now(timezone.utc).isoformat()
+            }
+            mock_kv[f"rule_profile:{pid}"] = json.dumps(data, ensure_ascii=False)
+            save_kv_to_disk()
+
+            # 联动刷新：重新触发所有绑定该规则配置的订阅重新生成本地配置文件！
+            updated_subs = []
+            for k, v in list(mock_kv.items()):
+                if k.startswith("sub:"):
+                    try:
+                        s_info = json.loads(v)
+                        if s_info.get("ruleProfileId") == pid or (pid == "default" and not s_info.get("ruleProfileId")):
+                            s_id = k.replace("sub:", "")
+                            run_conversion_and_save(s_id, s_info)
+                            updated_subs.append(s_id)
+                    except Exception as re_err:
+                        print(f"[Warn] 联动重生成订阅失败 {k}: {re_err}")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "id": pid, "data": data, "refreshedSubs": updated_subs}, ensure_ascii=False).encode("utf-8"))
+
+        elif self.path == "/api/rule_profiles/delete":
+            pid = (body.get("id") or "").strip()
+            if not pid:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "缺少规则配置 ID"}, ensure_ascii=False).encode("utf-8"))
+                return
+            if pid in ["none", "default"]:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "系统基础预置规则配置不可删除"}, ensure_ascii=False).encode("utf-8"))
+                return
+            if f"rule_profile:{pid}" in mock_kv:
+                del mock_kv[f"rule_profile:{pid}"]
                 save_kv_to_disk()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
