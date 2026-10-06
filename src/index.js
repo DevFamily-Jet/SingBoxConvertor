@@ -937,79 +937,8 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
     }
   ];
 
-  // 初始 DNS 规则 (用户自定义域名在此拦截)
-  const dnsRules = [];
-
-  // Route 规则构建
-  const routeRules = [
-    {
-      action: "sniff"
-    },
-    {
-      action: "hijack-dns",
-      protocol: "dns"
-    },
-    // 拦截 QUIC (UDP 443)，促使 Chrome/浏览器无感平滑回退到稳定的 TCP HTTP/2，彻底根除 YouTube 掉区与 Gemini 地区不支持问题
-    {
-      action: "reject",
-      network: "udp",
-      port: [443]
-    },
-    // ECH 域名直连 (防止循环死锁)
-    {
-      action: "route",
-      domain_suffix: [
-        "cloudflare-ech.com"
-      ],
-      outbound: "direct"
-    },
-    // GitHub 及其所有资源域名强制走代理 (国内直连必定受阻)
-    {
-      action: "route",
-      domain_suffix: [
-        "github.com",
-        "githubusercontent.com",
-        "githubassets.com",
-        "github.io",
-        "githubapp.com"
-      ],
-      outbound: "proxy"
-    },
-    // Google 遥测与服务域名走代理，避免被国内直连阻断导致超时
-    {
-      action: "route",
-      domain_suffix: [
-        "gvt1.com",
-        "gvt2.com",
-        "gcp.gvt2.com"
-      ],
-      outbound: "proxy"
-    },
-    // 防止其他代理软件 (Clash Verge / v2rayN) 与 sing-box TUN 发生路由回环死锁
-    {
-      action: "route",
-      process_name: [
-        "verge-mihomo-alpha.exe",
-        "clash-verge.exe",
-        "clash.exe",
-        "mihomo.exe",
-        "v2rayN.exe",
-        "v2ray.exe",
-        "xray.exe"
-      ],
-      outbound: "direct"
-    },
-    {
-      action: "reject",
-      rule_set: "geosite-category-ads-all"
-    }
-  ];
-
-  // --- 自定义拒绝拦截规则 (DNS & Route) ---
-  // 支持域名、IP/CIDR、Android 应用包名（支持 * 通配符，自动转为 package_name_regex）及桌面进程名（.exe）
-  // 即使在用户界面或配置中将包名与域名放置在一起，也会智能识别分流并生成独立的 Sing-box 路由规则，避免逻辑与（AND）导致失效
+  // --- 自定义拒绝拦截规则提取与智能分类 ---
   const domainSuffixSet = new Set();
-  const domainExactSet = new Set();
   const domainRegexSet = new Set();
   const ipCidrSet = new Set();
   const exactPackageSet = new Set();
@@ -1068,7 +997,6 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
       domainRegexSet.add(wildcardToRegex(clean));
     } else if (clean) {
       domainSuffixSet.add(clean.toLowerCase());
-      domainExactSet.add(clean.toLowerCase());
     }
   }
 
@@ -1087,45 +1015,15 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
   parseRawArr(rejectRules.ips);
   parseRawArr(rejectRules.packages);
 
-  // 1. 生成域名拒绝规则 (DNS & Route)
-  if (domainSuffixSet.size > 0 || domainExactSet.size > 0 || domainRegexSet.size > 0) {
-    const dRuleDns = { action: "reject" };
-    const dRuleRoute = { action: "reject" };
-    if (domainSuffixSet.size > 0) {
-      dRuleDns.domain_suffix = Array.from(domainSuffixSet);
-      dRuleRoute.domain_suffix = Array.from(domainSuffixSet);
-    }
-    if (domainExactSet.size > 0) {
-      dRuleDns.domain = Array.from(domainExactSet);
-      dRuleRoute.domain = Array.from(domainExactSet);
-    }
-    if (domainRegexSet.size > 0) {
-      dRuleDns.domain_regex = Array.from(domainRegexSet);
-      dRuleRoute.domain_regex = Array.from(domainRegexSet);
-    }
-    dnsRules.push(dRuleDns);
-    routeRules.push(dRuleRoute);
-  }
+  // --- DNS 规则构建 ---
+  const dnsRules = [];
 
-  // 2. 生成 IP / CIDR 拒绝规则 (Route)
-  if (ipCidrSet.size > 0) {
-    routeRules.push({ action: "reject", ip_cidr: Array.from(ipCidrSet) });
-  }
-
-  // 3. 生成 Android 包名拒绝规则 (Route)
+  // 若存在被拦截的应用包名，在 DNS 层面同步拦截其解析请求，双重阻断
   if (exactPackageSet.size > 0) {
-    routeRules.push({ action: "reject", package_name: Array.from(exactPackageSet) });
+    dnsRules.push({ action: "reject", package_name: Array.from(exactPackageSet) });
   }
   if (wildcardPackageRegexSet.size > 0) {
-    routeRules.push({ action: "reject", package_name_regex: Array.from(wildcardPackageRegexSet) });
-  }
-
-  // 4. 生成 桌面进程名 拒绝规则 (Route)
-  if (exactProcessSet.size > 0) {
-    routeRules.push({ action: "reject", process_name: Array.from(exactProcessSet) });
-  }
-  if (wildcardProcessRegexSet.size > 0) {
-    routeRules.push({ action: "reject", process_path_regex: Array.from(wildcardProcessRegexSet) });
+    dnsRules.push({ action: "reject", package_name_regex: Array.from(wildcardPackageRegexSet) });
   }
 
   dnsRules.push(
@@ -1181,7 +1079,6 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
     }
   ];
 
-
   const dns = {
     servers: [
       {
@@ -1206,7 +1103,109 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
     final: "dns-remote"
   };
 
+  // --- Route 规则构建 (严格遵循优先级执行链) ---
+  const routeRules = [
+    {
+      action: "sniff"
+    },
+    // 1. 防止其他代理软件 (Clash Verge / v2rayN) 与 sing-box TUN 发生路由回环死锁
+    {
+      action: "route",
+      process_name: [
+        "verge-mihomo-alpha.exe",
+        "clash-verge.exe",
+        "clash.exe",
+        "mihomo.exe",
+        "v2rayN.exe",
+        "v2ray.exe",
+        "xray.exe"
+      ],
+      outbound: "direct"
+    }
+  ];
+
+  // 2. 应用包名与进程名拦截规则 (最优先判定：置于 hijack-dns 之前，一旦命中，连同其发出的 DNS 查询与网络连接一并掐死！)
+  if (exactPackageSet.size > 0) {
+    routeRules.push({ action: "reject", package_name: Array.from(exactPackageSet) });
+  }
+  if (wildcardPackageRegexSet.size > 0) {
+    routeRules.push({ action: "reject", package_name_regex: Array.from(wildcardPackageRegexSet) });
+  }
+  if (exactProcessSet.size > 0) {
+    routeRules.push({ action: "reject", process_name: Array.from(exactProcessSet) });
+  }
+  if (wildcardProcessRegexSet.size > 0) {
+    routeRules.push({ action: "reject", process_path_regex: Array.from(wildcardProcessRegexSet) });
+  }
+
+  // 3. 常规流量 DNS 劫持 (进入 Sing-box 内置 DNS 模块)
+  routeRules.push({
+    action: "hijack-dns",
+    protocol: "dns"
+  });
+
+  // 4. 拦截 QUIC (UDP 443)，促使 Chrome/浏览器无感平滑回退到稳定的 TCP HTTP/2，彻底根除 YouTube 掉区与 Gemini 地区不支持问题
+  routeRules.push({
+    action: "reject",
+    network: "udp",
+    port: [443]
+  });
+
+  // 5. ECH 域名直连 (防止循环死锁)
+  routeRules.push({
+    action: "route",
+    domain_suffix: [
+      "cloudflare-ech.com"
+    ],
+    outbound: "direct"
+  });
+
+  // 6. 广告规则集拒绝拦截
+  routeRules.push({
+    action: "reject",
+    rule_set: "geosite-category-ads-all"
+  });
+
+  // 7. 用户自定义 IP / CIDR 拒绝规则
+  if (ipCidrSet.size > 0) {
+    routeRules.push({ action: "reject", ip_cidr: Array.from(ipCidrSet) });
+  }
+
+  // 8. 用户自定义域名拒绝规则 (仅集中在路由层，仅输出 domain_suffix 与通配 domain_regex，彻底消除文件首尾重复)
+  if (domainSuffixSet.size > 0 || domainRegexSet.size > 0) {
+    const dRuleRoute = { action: "reject" };
+    if (domainSuffixSet.size > 0) {
+      dRuleRoute.domain_suffix = Array.from(domainSuffixSet);
+    }
+    if (domainRegexSet.size > 0) {
+      dRuleRoute.domain_regex = Array.from(domainRegexSet);
+    }
+    routeRules.push(dRuleRoute);
+  }
+
+  // 9. 必须代理的特定域名 (GitHub 静态资源、Google 遥测等)
   routeRules.push(
+    {
+      action: "route",
+      domain_suffix: [
+        "github.com",
+        "githubusercontent.com",
+        "githubassets.com",
+        "github.io",
+        "githubapp.com"
+      ],
+      outbound: "proxy"
+    },
+    {
+      action: "route",
+      domain_suffix: [
+        "gvt1.com",
+        "gvt2.com",
+        "gcp.gvt2.com"
+      ],
+      outbound: "proxy"
+    },
+    // 10. 内网与国内直连
     {
       action: "route",
       ip_is_private: true,
@@ -1217,11 +1216,13 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
       rule_set: ["geoip-cn", "geosite-cn"],
       outbound: "direct"
     },
+    // 11. 境外规则集代理分流
     {
       action: "route",
       rule_set: "geosite-geolocation-!cn",
       outbound: "proxy"
     },
+    // 12. 最终默认代理兜底
     {
       action: "route",
       outbound: "proxy"
@@ -1229,6 +1230,7 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
   );
 
   const route = {
+    find_process: true,
     auto_detect_interface: true,
     default_domain_resolver: "dns-direct",
     rules: routeRules,
