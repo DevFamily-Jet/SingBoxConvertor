@@ -156,18 +156,28 @@ const DEFAULT_RULE_PROFILES = [
 ];
 
 async function resolveRejectRules(env, subInfo) {
-  const profileId = subInfo.ruleProfileId || "default";
-  let profileRules = { domains: [], ips: [], packages: [] };
+  let profileIds = subInfo.ruleProfileIds || (subInfo.ruleProfileId ? [subInfo.ruleProfileId] : ["default"]);
+  if (!Array.isArray(profileIds)) {
+    profileIds = [profileIds];
+  }
+  
+  let mergedDomains = [];
+  let mergedIps = [];
+  let mergedPackages = [];
 
-  if (profileId === "none") {
-    profileRules = { domains: [], ips: [], packages: [] };
-  } else {
+  for (const profileId of profileIds) {
+    if (profileId === "none") {
+      continue;
+    }
+    
     let raw = null;
     if (env && env.SUB_KV) {
       try {
         raw = await env.SUB_KV.get("rule_profile:" + profileId);
       } catch (e) {}
     }
+    
+    let profileRules;
     if (raw) {
       try {
         const obj = JSON.parse(raw);
@@ -176,27 +186,38 @@ async function resolveRejectRules(env, subInfo) {
           ips: obj.ips || [],
           packages: obj.packages || []
         };
-      } catch (e) {}
+      } catch (e) {
+        profileRules = { domains: [], ips: [], packages: [] };
+      }
     } else {
-      const def = DEFAULT_RULE_PROFILES.find(p => p.id === profileId) || DEFAULT_RULE_PROFILES[0];
-      profileRules = {
-        domains: def.domains || [],
-        ips: def.ips || [],
-        packages: def.packages || []
-      };
+      const def = DEFAULT_RULE_PROFILES.find(p => p.id === profileId);
+      if (def) {
+        profileRules = {
+          domains: def.domains || [],
+          ips: def.ips || [],
+          packages: def.packages || []
+        };
+      } else {
+        profileRules = { domains: [], ips: [], packages: [] };
+      }
     }
+    
+    mergedDomains.push(...profileRules.domains);
+    mergedIps.push(...profileRules.ips);
+    mergedPackages.push(...profileRules.packages);
   }
 
   // 如果订阅自身还定义了额外/覆盖规则 (rejectRules)，则合并生效
   const extra = subInfo.rejectRules || {};
-  const mergedDomains = [...(profileRules.domains || []), ...(extra.domains || [])];
-  const mergedIps = [...(profileRules.ips || []), ...(extra.ips || [])];
-  const mergedPackages = [...(profileRules.packages || []), ...(extra.packages || [])];
+  mergedDomains.push(...(extra.domains || []));
+  mergedIps.push(...(extra.ips || []));
+  mergedPackages.push(...(extra.packages || []));
 
+  // Deduplicate arrays
   return {
-    domains: mergedDomains,
-    ips: mergedIps,
-    packages: mergedPackages
+    domains: [...new Set(mergedDomains)],
+    ips: [...new Set(mergedIps)],
+    packages: [...new Set(mergedPackages)]
   };
 }
 
@@ -232,16 +253,20 @@ async function handleClientSub(request, env, subId, url) {
   const enableTun = url.searchParams.get("tun") !== null
     ? url.searchParams.get("tun") !== "false"
     : (subInfo.enableTun !== false);
+  const enableIpv6 = url.searchParams.get("ipv6") !== null
+    ? url.searchParams.get("ipv6") === "true"
+    : (subInfo.enableIpv6 === true);
 
   const rejectRules = await resolveRejectRules(env, subInfo);
 
   const subIdParam = subId;
-  return convertFromUrl(subInfo.sourceUrl, { targetVersion, enableTun, rejectRules, env, subId: subIdParam });
+  return convertFromUrl(subInfo.sourceUrl, { targetVersion, enableTun, enableIpv6, rejectRules, env, subId: subIdParam });
 }
 
 async function convertFromUrl(sourceUrl, options = {}) {
   const targetVersion = options.targetVersion || "1.15";
   const enableTun = options.enableTun !== false;
+  const enableIpv6 = options.enableIpv6 === true;
   const rejectRules = options.rejectRules || {};
   const env = options.env;
   const subId = options.subId;
@@ -254,7 +279,7 @@ async function convertFromUrl(sourceUrl, options = {}) {
       throw new Error("未能从订阅地址解析到任何有效节点");
     }
 
-    const config = generateSingBoxConfig(nodes, { targetVersion, enableTun, rejectRules });
+    const config = generateSingBoxConfig(nodes, { targetVersion, enableTun, enableIpv6, rejectRules });
     const configBody = JSON.stringify(config, null, 2);
 
     // 如果绑定了 KV，将成功生成的配置持久化缓存
@@ -883,21 +908,22 @@ function safeBase64Decode(str) {
   }
 }
 
-function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true, rejectRules = {} }) {
+function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true, enableIpv6 = false, rejectRules = {} }) {
   const nodeTags = nodes.map(n => n.tag);
   const selectorOutbounds = ["auto", ...nodeTags, "direct"];
 
   const inbounds = [];
   if (enableTun) {
+    const tunAddress = ["172.19.0.1/30"];
+    if (enableIpv6) {
+      tunAddress.push("fdfe:dcba:9876::1/126");
+    }
     inbounds.push({
       type: "tun",
       tag: "tun-in",
       interface_name: "singbox-tun",
       mtu: 1400,
-      address: [
-        "172.19.0.1/30",
-        "fdfe:dcba:9876::1/126"
-      ],
+      address: tunAddress,
       auto_route: true,
       strict_route: true,
       endpoint_independent_nat: true
@@ -1100,7 +1126,8 @@ function generateSingBoxConfig(nodes, { targetVersion = "1.15", enableTun = true
       }
     ],
     rules: dnsRules,
-    final: "dns-remote"
+    final: "dns-remote",
+    strategy: enableIpv6 ? "prefer_ipv4" : "ipv4_only"
   };
 
   // --- Route 规则构建 (严格遵循优先级执行链) ---
@@ -1311,7 +1338,8 @@ async function handleApiCreate(request, env, corsHeaders) {
     name: body.name || "默认订阅",
     targetVersion: body.targetVersion || "1.15",
     enableTun: body.enableTun !== false,
-    ruleProfileId: body.ruleProfileId || "default",
+    enableIpv6: body.enableIpv6 === true,
+    ruleProfileIds: Array.isArray(body.ruleProfileIds) ? body.ruleProfileIds : (body.ruleProfileId ? [body.ruleProfileId] : ["default"]),
     rejectRules: {
       domains: parseInputList(body.rejectDomains),
       ips: parseInputList(body.rejectIps),
@@ -1346,7 +1374,8 @@ async function handleApiUpdate(request, env, corsHeaders) {
     name: body.name || prev.name,
     targetVersion: body.targetVersion || prev.targetVersion || "1.15",
     enableTun: body.enableTun !== undefined ? body.enableTun : prev.enableTun,
-    ruleProfileId: body.ruleProfileId !== undefined ? body.ruleProfileId : (prev.ruleProfileId || "default"),
+    enableIpv6: body.enableIpv6 !== undefined ? body.enableIpv6 : (prev.enableIpv6 || false),
+    ruleProfileIds: body.ruleProfileIds !== undefined ? body.ruleProfileIds : (body.ruleProfileId ? [body.ruleProfileId] : (prev.ruleProfileIds || (prev.ruleProfileId ? [prev.ruleProfileId] : ["default"]))),
     rejectRules: {
       domains: body.rejectDomains !== undefined ? parseInputList(body.rejectDomains) : (prev.rejectRules?.domains || []),
       ips: body.rejectIps !== undefined ? parseInputList(body.rejectIps) : (prev.rejectRules?.ips || []),
@@ -1480,9 +1509,7 @@ async function handleApiRuleProfilesDelete(request, env, corsHeaders) {
   if (!id) {
     return new Response(JSON.stringify({ error: "缺少规则配置 ID" }), { status: 400, headers: corsHeaders });
   }
-  if (id === "none" || id === "default") {
-    return new Response(JSON.stringify({ error: "系统基础预置规则配置不可删除" }), { status: 400, headers: corsHeaders });
-  }
+
 
   await env.SUB_KV.delete("rule_profile:" + id);
   return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
@@ -1501,7 +1528,7 @@ function renderHtml(origin) {
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
   <title>Sing-box 订阅转换托管中心 (CF Worker + KV)</title>
   <style>
     :root {
@@ -1517,6 +1544,7 @@ function renderHtml(origin) {
       --primary: #38bdf8;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; width: 100%; }
     body { background-color: var(--bg); color: var(--text); padding: 28px 16px; min-height: 100vh; display: flex; justify-content: center; }
     .container { width: 100%; max-width: 920px; }
     .header { text-align: center; margin-bottom: 28px; }
@@ -1527,11 +1555,35 @@ function renderHtml(origin) {
     .form-group { margin-bottom: 16px; }
     label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text-muted); }
     .label-hint { font-size: 12px; color: #64748b; font-weight: normal; margin-left: 6px; }
-    input, select, textarea { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border); background: #0f172a; color: var(--text); font-size: 14px; transition: border-color 0.2s; }
+    input:not([type="checkbox"]), select, textarea { width: 100%; padding: 12px; border-radius: 6px; border: 1px solid var(--border); background: #0f172a; color: var(--text); font-size: 16px; transition: border-color 0.2s; }
     input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
-    textarea { resize: vertical; min-height: 64px; font-family: monospace; font-size: 13px; }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+    input[type="checkbox"] { width: 18px; height: 18px; margin: 0; cursor: pointer; }
+    textarea { resize: vertical; min-height: 150px; max-height: 60vh; font-family: monospace; font-size: 16px; line-height: 1.5; word-break: break-all; white-space: pre-wrap; }
+    
+    /* 增大文本框拖拽把手，方便移动端触摸 */
+    ::-webkit-resizer {
+      background-color: var(--border);
+      border-left: 2px solid var(--bg);
+      border-top: 2px solid var(--bg);
+    }
+    textarea::-webkit-resizer {
+      background-color: #38bdf8;
+    }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+    
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 1000; align-items: center; justify-content: center; }
+    .modal-content { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 24px; width: 95%; max-width: 800px; max-height: 92vh; overflow-y: auto; position: relative; }
+
+    @media (max-width: 900px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .sub-header, .sub-url { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .sub-header > div:last-child { width: 100%; display: flex; justify-content: flex-end; }
+      
+      .modal-overlay { align-items: flex-start; }
+      .modal-content { width: 100%; max-width: 100%; height: 100%; max-height: 100vh; border-radius: 0; border: none; padding: 16px; }
+    }
     .btn { background: var(--accent); color: #000; font-weight: 600; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
     .btn:hover { background: var(--accent-hover); }
     .btn-sm { padding: 6px 12px; font-size: 12px; }
@@ -1603,13 +1655,21 @@ function renderHtml(origin) {
         </div>
       </div>
 
+      <div class="grid-2">
+        <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="enableTun" checked>
+          <label for="enableTun" style="margin:0; cursor:pointer;">开启局域网代理 (TUN) <span class="label-hint">默认开启</span></label>
+        </div>
+        <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="enableIpv6">
+          <label for="enableIpv6" style="margin:0; cursor:pointer;">开启 IPv6 支持 <span class="label-hint">默认关闭</span></label>
+        </div>
+      </div>
+
       <!-- 关联规则配置文件 -->
       <div class="form-group">
-        <label>🛡️ 关联拒绝拦截规则配置文件</label>
-        <select id="subRuleProfile" onchange="onRuleProfileChange('sub')">
-          <option value="">加载中...</option>
-        </select>
-        <div id="subProfileDesc" style="font-size: 12px; color: #38bdf8; margin-top: 6px;"></div>
+        <label>🛡️ 关联拒绝拦截规则配置文件 (可多选)</label>
+        <div id="subRuleProfileContainer" class="checkbox-group" style="background: #131d2e; border: 1px solid var(--border); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">加载中...</div>
       </div>
 
       <!-- 可选高级独立自定义覆盖 -->
@@ -1656,8 +1716,8 @@ function renderHtml(origin) {
   </div>
 
   <!-- 编辑订阅弹窗 -->
-  <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:999;align-items:center;justify-content:center;">
-    <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:100%;max-width:640px;max-height:90vh;overflow-y:auto;position:relative;">
+  <div id="editModal" class="modal-overlay">
+    <div class="modal-content">
       <h2 style="font-size:18px;margin-bottom:20px;color:#10b981;">✏️ 编辑订阅 &nbsp;<span id="editId" style="font-size:13px;color:#94a3b8;font-weight:400;"></span></h2>
 
       <div class="form-group">
@@ -1675,10 +1735,20 @@ function renderHtml(origin) {
         </select>
       </div>
 
+      <div class="grid-2">
+        <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="editEnableTun">
+          <label for="editEnableTun" style="margin:0; cursor:pointer;">开启局域网代理 (TUN) <span class="label-hint">默认开启</span></label>
+        </div>
+        <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="editEnableIpv6">
+          <label for="editEnableIpv6" style="margin:0; cursor:pointer;">开启 IPv6 支持 <span class="label-hint">默认关闭</span></label>
+        </div>
+      </div>
+
       <div class="form-group">
-        <label>🛡️ 关联拒绝拦截规则配置文件</label>
-        <select id="editRuleProfile" onchange="onRuleProfileChange('edit')"></select>
-        <div id="editProfileDesc" style="font-size: 12px; color: #38bdf8; margin-top: 6px;"></div>
+        <label>🛡️ 关联拒绝拦截规则配置文件 (可多选)</label>
+        <div id="editRuleProfileContainer" class="checkbox-group" style="background: #131d2e; border: 1px solid var(--border); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">加载中...</div>
       </div>
 
       <details style="margin-bottom: 16px; background: #131d2e; border: 1px solid #1e3a5f; border-radius: 8px; padding: 12px 16px;">
@@ -1709,8 +1779,8 @@ function renderHtml(origin) {
   </div>
 
   <!-- 规则配置文件编辑/创建弹窗 -->
-  <div id="ruleProfileModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:1000;align-items:center;justify-content:center;">
-    <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px;width:100%;max-width:700px;max-height:92vh;overflow-y:auto;position:relative;">
+  <div id="ruleProfileModal" class="modal-overlay">
+    <div class="modal-content">
       <h2 style="font-size:18px;margin-bottom:20px;color:#38bdf8;" id="rpmTitle">🛡️ 规则配置文件</h2>
       
       <div class="grid-2">
@@ -1731,24 +1801,25 @@ function renderHtml(origin) {
 
       <div class="rules-section">
         <div class="rules-header">🛡️ 规则拦截清单 (自动智能识别分流；包名支持 * 通配符)</div>
-        <div class="grid-3">
-          <div class="form-group" style="margin-bottom:0;">
+        <div>
+          <div class="form-group">
             <label>拒绝域名 (Domain / Suffix)<span class="label-hint">支持 *. 前缀</span></label>
-            <textarea id="rpmDomains" rows="8" placeholder="*.pangolin-sdk-toutiao.com&#10;adservice.google.com"></textarea>
+            <textarea id="rpmDomains" rows="6" placeholder="*.pangolin-sdk-toutiao.com&#10;adservice.google.com"></textarea>
           </div>
-          <div class="form-group" style="margin-bottom:0;">
+          <div class="form-group">
             <label>拒绝 IP / CIDR<span class="label-hint">每行一个</span></label>
-            <textarea id="rpmIps" rows="8" placeholder="123.56.78.90/32"></textarea>
+            <textarea id="rpmIps" rows="6" placeholder="123.56.78.90/32"></textarea>
           </div>
-          <div class="form-group" style="margin-bottom:0;">
+          <div class="form-group">
             <label>拒绝包名 / 进程<span class="label-hint">支持 * 通配符与 .exe</span></label>
-            <textarea id="rpmPackages" rows="8" placeholder="com.ss.android.*&#10;pinduoduo.exe"></textarea>
+            <textarea id="rpmPackages" rows="6" placeholder="com.ss.android.*&#10;pinduoduo.exe"></textarea>
           </div>
         </div>
       </div>
 
-      <div style="display:flex;gap:12px;margin-top:16px;">
+      <div style="display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;">
         <button id="rpmSaveBtn" class="btn" onclick="saveRuleProfile()">💾 保存规则配置</button>
+        <button id="rpmResetBtn" class="btn btn-danger" style="display:none;" onclick="resetBuiltinProfile()">🔄 恢复默认规则</button>
         <button class="btn btn-secondary" onclick="closeRuleProfileModal()">取消</button>
       </div>
     </div>
@@ -1815,28 +1886,22 @@ function renderHtml(origin) {
     }
 
     function populateProfileDropdowns() {
-      const subSel = document.getElementById('subRuleProfile');
-      const editSel = document.getElementById('editRuleProfile');
+      const subContainer = document.getElementById('subRuleProfileContainer');
+      const editContainer = document.getElementById('editRuleProfileContainer');
       let html = '';
-      _ruleProfiles.forEach(p => {
+      _ruleProfiles.forEach((p, index) => {
         const countStr = ((p.domains||[]).length + (p.packages||[]).length) > 0 ? (' (' + (p.domains||[]).length + ' 域名, ' + (p.packages||[]).length + ' 包名)') : ' (无拦截)';
-        html += '<option value="' + p.id + '">' + p.name + countStr + '</option>';
+        html += '<label class="checkbox-item" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; color: var(--text); padding: 4px 0;"><input type="checkbox" name="ruleProfile" value="' + p.id + '"> ' + (index + 1) + '. ' + p.name + countStr + '</label>';
       });
-      subSel.innerHTML = html;
-      editSel.innerHTML = html;
-      subSel.value = 'default';
-      onRuleProfileChange('sub');
+      subContainer.innerHTML = html;
+      editContainer.innerHTML = html.replace(/name="ruleProfile"/g, 'name="editRuleProfile"');
+      
+      const defCheck = subContainer.querySelector('input[value="default"]');
+      if (defCheck) defCheck.checked = true;
     }
 
     function onRuleProfileChange(target) {
-      const sel = document.getElementById(target === 'edit' ? 'editRuleProfile' : 'subRuleProfile');
-      const descEl = document.getElementById(target === 'edit' ? 'editProfileDesc' : 'subProfileDesc');
-      const p = _ruleProfiles.find(i => i.id === sel.value);
-      if (p) {
-        descEl.textContent = '💡 ' + (p.description || '已关联该规则配置文件');
-      } else {
-        descEl.textContent = '';
-      }
+      // Intentionally left blank as description text is removed
     }
 
     function openCreateRuleProfile() {
@@ -1849,6 +1914,7 @@ function renderHtml(origin) {
       document.getElementById('rpmDomains').value = '';
       document.getElementById('rpmIps').value = '';
       document.getElementById('rpmPackages').value = '';
+      document.getElementById('rpmResetBtn').style.display = 'none';
       document.getElementById('ruleProfileModal').style.display = 'flex';
     }
 
@@ -1864,7 +1930,38 @@ function renderHtml(origin) {
       document.getElementById('rpmDomains').value = (p.domains || []).join('\\n');
       document.getElementById('rpmIps').value = (p.ips || []).join('\\n');
       document.getElementById('rpmPackages').value = (p.packages || []).join('\\n');
+      const isSystem = (p.id === 'none' || p.id === 'default' || p.id === 'strict');
+      document.getElementById('rpmResetBtn').style.display = isSystem ? 'inline-block' : 'none';
       document.getElementById('ruleProfileModal').style.display = 'flex';
+    }
+
+    async function resetBuiltinProfile() {
+      const id = document.getElementById('rpmId').value.trim();
+      if (!confirm('确定要恢复该规则为初始默认状态吗？你自定义的规则将被清除。')) return;
+      const btn = document.getElementById('rpmResetBtn');
+      btn.disabled = true;
+      btn.textContent = '恢复中...';
+      try {
+        const res = await fetch('/api/rule_profiles/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id })
+        });
+        const ret = await res.json();
+        if (ret.success) {
+          closeRuleProfileModal();
+          await loadRuleProfiles();
+          loadSubs();
+          alert('✅ 已成功恢复为系统默认规则！');
+        } else {
+          alert('恢复失败: ' + (ret.error || '未知错误'));
+        }
+      } catch (e) {
+        alert('❌ 请求异常: ' + e.message);
+      } finally {
+        btn.textContent = '🔄 恢复默认规则';
+        btn.disabled = false;
+      }
     }
 
     function closeRuleProfileModal() {
@@ -1949,9 +2046,11 @@ function renderHtml(origin) {
         container.innerHTML = '';
         data.items.forEach(item => {
           const clientUrl = origin + '/sub/' + item.id;
-          const pid = item.ruleProfileId || 'default';
-          const p = _ruleProfiles.find(i => i.id === pid);
-          const pName = p ? p.name : pid;
+          const pids = item.ruleProfileIds || (item.ruleProfileId ? [item.ruleProfileId] : ['default']);
+          const pNames = pids.map(pid => {
+            const p = _ruleProfiles.find(i => i.id === pid);
+            return p ? p.name : pid;
+          }).join(', ');
 
           const rules = item.rejectRules || {};
           const extraCount = (rules.domains||[]).length + (rules.ips||[]).length + (rules.packages||[]).length;
@@ -1966,7 +2065,7 @@ function renderHtml(origin) {
                 '<span class="sub-title">' + (item.name || '未命名') + '</span> ' +
                 '<span class="badge">ID: ' + item.id + '</span> ' +
                 '<span class="badge">v' + (item.targetVersion || '1.15') + '</span> ' +
-                '<span class="badge badge-reject">🛡️ 规则配置: ' + pName + '</span> ' +
+                '<span class="badge badge-reject">🛡️ 规则配置: ' + pNames + '</span> ' +
                 extraBadge +
               '</div>' +
               '<div style="display:flex;gap:6px;">' +
@@ -1997,7 +2096,10 @@ function renderHtml(origin) {
       const sourceUrl = document.getElementById('sourceUrl').value.trim();
       const id = document.getElementById('subId').value.trim();
       const targetVersion = document.getElementById('targetVersion').value || '1.15';
-      const ruleProfileId = document.getElementById('subRuleProfile').value || 'default';
+      const enableTun = document.getElementById('enableTun').checked;
+      const enableIpv6 = document.getElementById('enableIpv6').checked;
+      const ruleProfileIds = Array.from(document.querySelectorAll('#subRuleProfileContainer input[name="ruleProfile"]:checked')).map(cb => cb.value);
+      if (ruleProfileIds.length === 0) ruleProfileIds.push('default');
       const rejectDomains = document.getElementById('rejectDomains').value;
       const rejectIps = document.getElementById('rejectIps').value;
       const rejectPackages = document.getElementById('rejectPackages').value;
@@ -2012,7 +2114,7 @@ function renderHtml(origin) {
         const res = await fetch('/api/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, sourceUrl, id, targetVersion, ruleProfileId, rejectDomains, rejectIps, rejectPackages })
+          body: JSON.stringify({ name, sourceUrl, id, targetVersion, enableTun, enableIpv6, ruleProfileIds, rejectDomains, rejectIps, rejectPackages })
         });
         const ret = await res.json();
         if (ret.success) {
@@ -2051,8 +2153,12 @@ function renderHtml(origin) {
       document.getElementById('editName').value = item.name || '';
       document.getElementById('editSourceUrl').value = item.sourceUrl || '';
       document.getElementById('editTargetVersion').value = item.targetVersion || '1.15';
-      document.getElementById('editRuleProfile').value = item.ruleProfileId || 'default';
-      onRuleProfileChange('edit');
+      document.getElementById('editEnableTun').checked = item.enableTun !== false;
+      document.getElementById('editEnableIpv6').checked = item.enableIpv6 === true;
+      const pids = item.ruleProfileIds || (item.ruleProfileId ? [item.ruleProfileId] : ['default']);
+      document.querySelectorAll('#editRuleProfileContainer input[name="editRuleProfile"]').forEach(cb => {
+        cb.checked = pids.includes(cb.value);
+      });
       document.getElementById('editRejectDomains').value = (rules.domains || []).join('\\n');
       document.getElementById('editRejectIps').value = (rules.ips || []).join('\\n');
       document.getElementById('editRejectPackages').value = (rules.packages || []).join('\\n');
@@ -2078,7 +2184,12 @@ function renderHtml(origin) {
             name: document.getElementById('editName').value.trim(),
             sourceUrl: document.getElementById('editSourceUrl').value.trim(),
             targetVersion: document.getElementById('editTargetVersion').value || '1.15',
-            ruleProfileId: document.getElementById('editRuleProfile').value || 'default',
+            enableTun: document.getElementById('editEnableTun').checked,
+            enableIpv6: document.getElementById('editEnableIpv6').checked,
+            ruleProfileIds: (() => {
+              const ids = Array.from(document.querySelectorAll('#editRuleProfileContainer input[name="editRuleProfile"]:checked')).map(cb => cb.value);
+              return ids.length ? ids : ['default'];
+            })(),
             rejectDomains: document.getElementById('editRejectDomains').value,
             rejectIps: document.getElementById('editRejectIps').value,
             rejectPackages: document.getElementById('editRejectPackages').value

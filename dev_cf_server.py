@@ -125,18 +125,25 @@ DEFAULT_RULE_PROFILES = {
 }
 
 def resolve_sub_rules(sub_info):
-    pid = sub_info.get("ruleProfileId", "default")
+    pids = sub_info.get("ruleProfileIds")
+    if not pids:
+        pid = sub_info.get("ruleProfileId", "default")
+        pids = [pid] if pid else ["default"]
+        
     domains = []
     ips = []
     packages = []
-    if pid != "none":
+    
+    for pid in pids:
+        if pid == "none":
+            continue
         praw = mock_kv.get(f"rule_profile:{pid}")
         if praw:
             try:
                 pobj = json.loads(praw)
-                domains = list(pobj.get("domains", []))
-                ips = list(pobj.get("ips", []))
-                packages = list(pobj.get("packages", []))
+                domains.extend(list(pobj.get("domains", [])))
+                ips.extend(list(pobj.get("ips", [])))
+                packages.extend(list(pobj.get("packages", [])))
             except Exception:
                 pass
         else:
@@ -144,9 +151,9 @@ def resolve_sub_rules(sub_info):
             if praw:
                 try:
                     pobj = json.loads(praw)
-                    domains = list(pobj.get("domains", []))
-                    ips = list(pobj.get("ips", []))
-                    packages = list(pobj.get("packages", []))
+                    domains.extend(list(pobj.get("domains", [])))
+                    ips.extend(list(pobj.get("ips", [])))
+                    packages.extend(list(pobj.get("packages", [])))
                 except Exception:
                     pass
     # 合并订阅内可能单独指定的规则
@@ -155,9 +162,9 @@ def resolve_sub_rules(sub_info):
     ips.extend(extra.get("ips", []))
     packages.extend(extra.get("packages", []))
     return {
-        "domains": [d for d in domains if d],
-        "ips": [i for i in ips if i],
-        "packages": [p for p in packages if p]
+        "domains": list(set([d for d in domains if d])),
+        "ips": list(set([i for i in ips if i])),
+        "packages": list(set([p for p in packages if p]))
     }
 
 def load_kv_from_disk():
@@ -467,13 +474,13 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
         
         if self.path == "/api/create":
             sub_id = (body.get("id") or "sub_" + os.urandom(3).hex()).strip()
-            rule_profile_id = body.get("ruleProfileId") or "default"
+            rule_profile_ids = body.get("ruleProfileIds") if "ruleProfileIds" in body else ([body.get("ruleProfileId")] if body.get("ruleProfileId") else ["default"])
             sub_info = {
                 "sourceUrl": body.get("sourceUrl"),
                 "name": body.get("name") or "未命名订阅",
                 "targetVersion": body.get("targetVersion", "1.15"),
                 "enableTun": body.get("enableTun", True),
-                "ruleProfileId": rule_profile_id,
+                "ruleProfileIds": rule_profile_ids,
                 "rejectRules": {
                     "domains": parse_input_list(body.get("rejectDomains")),
                     "ips": parse_input_list(body.get("rejectIps")),
@@ -500,7 +507,9 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             sub_id = (body.get("id") or "").strip()
             if f"sub:{sub_id}" in mock_kv:
                 prev = json.loads(mock_kv[f"sub:{sub_id}"])
-                rule_profile_id = body.get("ruleProfileId") if "ruleProfileId" in body else prev.get("ruleProfileId", "default")
+                rule_profile_ids = body.get("ruleProfileIds") if "ruleProfileIds" in body else (
+                    [body.get("ruleProfileId")] if body.get("ruleProfileId") else prev.get("ruleProfileIds", [prev.get("ruleProfileId", "default")])
+                )
                 
                 reject_domains = parse_input_list(body.get("rejectDomains")) if "rejectDomains" in body else prev.get("rejectRules", {}).get("domains", [])
                 reject_ips = parse_input_list(body.get("rejectIps")) if "rejectIps" in body else prev.get("rejectRules", {}).get("ips", [])
@@ -511,7 +520,7 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                     "name": body.get("name") or prev.get("name"),
                     "targetVersion": body.get("targetVersion") or prev.get("targetVersion", "1.15"),
                     "enableTun": body.get("enableTun") if "enableTun" in body else prev.get("enableTun", True),
-                    "ruleProfileId": rule_profile_id,
+                    "ruleProfileIds": rule_profile_ids,
                     "rejectRules": {
                         "domains": reject_domains,
                         "ips": reject_ips,
@@ -620,7 +629,8 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 if k.startswith("sub:"):
                     try:
                         s_info = json.loads(v)
-                        if s_info.get("ruleProfileId") == pid or (pid == "default" and not s_info.get("ruleProfileId")):
+                        pids = s_info.get("ruleProfileIds") or ([s_info.get("ruleProfileId")] if s_info.get("ruleProfileId") else ["default"])
+                        if pid in pids:
                             s_id = k.replace("sub:", "")
                             run_conversion_and_save(s_id, s_info)
                             updated_subs.append(s_id)
@@ -640,12 +650,6 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "缺少规则配置 ID"}, ensure_ascii=False).encode("utf-8"))
                 return
-            if pid in ["none", "default"]:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "系统基础预置规则配置不可删除"}, ensure_ascii=False).encode("utf-8"))
-                return
             if f"rule_profile:{pid}" in mock_kv:
                 del mock_kv[f"rule_profile:{pid}"]
                 save_kv_to_disk()
@@ -659,12 +663,12 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"=======================================================")
-    print(f" Local Worker Server started at http://127.0.0.1:{PORT}")
+    print(f" Local Worker Server started at http://0.0.0.0:{PORT}")
     print(f" 临时转换目录: {TEMP_DIR}")
     print(f" 数据存储文件: {KV_STORE_FILE}")
     print(f" 注意: 后台关闭或重启后，临时文件与订阅数据均永久保留！")
     print(f"=======================================================")
     sys.stdout.flush()
 
-    with socketserver.TCPServer(("127.0.0.1", PORT), LocalDevHandler) as httpd:
+    with socketserver.TCPServer(("0.0.0.0", PORT), LocalDevHandler) as httpd:
         httpd.serve_forever()
