@@ -37,9 +37,19 @@ export default {
           headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
         });
       }
+      const tunParam = url.searchParams.get("tun");
+      const enableTun = tunParam !== null ? (tunParam !== "false" && tunParam !== "0" && tunParam !== "off") : true;
+      const ipv6Param = url.searchParams.get("ipv6");
+      const enableIpv6 = ipv6Param === "true" || ipv6Param === "1" || ipv6Param === "on";
+      const profileParam = url.searchParams.get("profile");
+      const rejectRules = profileParam ? await resolveRejectRules(env, { ruleProfileIds: [profileParam] }) : {};
+
       return convertFromUrl(sourceUrl, {
         targetVersion: url.searchParams.get("version") || "1.15",
-        enableTun: url.searchParams.get("tun") !== "false"
+        enableTun,
+        enableIpv6,
+        rejectRules,
+        env
       });
     }
 
@@ -250,11 +260,13 @@ async function handleClientSub(request, env, subId, url) {
   }
 
   const targetVersion = url.searchParams.get("version") || subInfo.targetVersion || "1.15";
-  const enableTun = url.searchParams.get("tun") !== null
-    ? url.searchParams.get("tun") !== "false"
+  const tunParam = url.searchParams.get("tun");
+  const enableTun = tunParam !== null
+    ? (tunParam !== "false" && tunParam !== "0" && tunParam !== "off")
     : (subInfo.enableTun !== false);
-  const enableIpv6 = url.searchParams.get("ipv6") !== null
-    ? url.searchParams.get("ipv6") === "true"
+  const ipv6Param = url.searchParams.get("ipv6");
+  const enableIpv6 = ipv6Param !== null
+    ? (ipv6Param === "true" || ipv6Param === "1" || ipv6Param === "on")
     : (subInfo.enableIpv6 === true);
 
   const rejectRules = await resolveRejectRules(env, subInfo);
@@ -1658,7 +1670,7 @@ function renderHtml(origin) {
       <div class="grid-2">
         <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="enableTun" checked>
-          <label for="enableTun" style="margin:0; cursor:pointer;">开启局域网代理 (TUN) <span class="label-hint">默认开启</span></label>
+          <label for="enableTun" style="margin:0; cursor:pointer;">启用 TUN 虚拟网卡模式 <span class="label-hint">全局接管流量 (默认开启)</span></label>
         </div>
         <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="enableIpv6">
@@ -1738,7 +1750,7 @@ function renderHtml(origin) {
       <div class="grid-2">
         <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="editEnableTun">
-          <label for="editEnableTun" style="margin:0; cursor:pointer;">开启局域网代理 (TUN) <span class="label-hint">默认开启</span></label>
+          <label for="editEnableTun" style="margin:0; cursor:pointer;">启用 TUN 虚拟网卡模式 <span class="label-hint">全局接管流量 (默认开启)</span></label>
         </div>
         <div class="form-group checkbox-group" style="display: flex; align-items: center; gap: 8px;">
           <input type="checkbox" id="editEnableIpv6">
@@ -2056,6 +2068,15 @@ function renderHtml(origin) {
           const extraCount = (rules.domains||[]).length + (rules.ips||[]).length + (rules.packages||[]).length;
           const extraBadge = extraCount > 0 ? ('<span class="badge" style="background:#0284c7;color:#fff;">+额外规则 (' + extraCount + ')</span> ') : '';
 
+          const tunBadge = (item.enableTun !== false)
+            ? '<span class="badge" style="background:#10b981;color:#fff;">TUN: 开启</span> '
+            : '<span class="badge" style="background:#64748b;color:#fff;">TUN: 关闭 (纯代理)</span> ';
+          const ipv6Badge = (item.enableIpv6 === true)
+            ? '<span class="badge" style="background:#06b6d4;color:#fff;">IPv6: 开启</span> '
+            : '';
+          const tunUrl = clientUrl + (clientUrl.includes('?') ? '&' : '?') + 'tun=true';
+          const noTunUrl = clientUrl + (clientUrl.includes('?') ? '&' : '?') + 'tun=false';
+
           const div = document.createElement('div');
           div.className = 'sub-item';
           div.id = 'sub-item-' + item.id;
@@ -2065,6 +2086,8 @@ function renderHtml(origin) {
                 '<span class="sub-title">' + (item.name || '未命名') + '</span> ' +
                 '<span class="badge">ID: ' + item.id + '</span> ' +
                 '<span class="badge">v' + (item.targetVersion || '1.15') + '</span> ' +
+                tunBadge +
+                ipv6Badge +
                 '<span class="badge badge-reject">🛡️ 规则配置: ' + pNames + '</span> ' +
                 extraBadge +
               '</div>' +
@@ -2075,13 +2098,19 @@ function renderHtml(origin) {
             '</div>' +
             '<div class="meta-tag">原地址: ' + item.sourceUrl + '</div>' +
             '<div class="sub-url">' +
-              '<span>' + clientUrl + '</span>' +
-              '<span class="copy-btn btn-copy" data-url="' + clientUrl + '">复制新订阅</span>' +
+              '<span style="user-select:all;">' + clientUrl + '</span>' +
+              '<div style="display:flex;gap:8px;align-items:center;flex-shrink:0;">' +
+                '<span class="copy-btn btn-copy" title="使用订阅默认配置">复制默认</span>' +
+                '<span class="copy-btn btn-copy-tun" style="color:#38bdf8;" title="强制开启 TUN 虚拟网卡">复制 TUN 链接</span>' +
+                '<span class="copy-btn btn-copy-notun" style="color:#f59e0b;" title="强制关闭 TUN，仅保留 2080 端口代理">复制纯代理链接</span>' +
+              '</div>' +
             '</div>';
 
           div.querySelector('.btn-edit').addEventListener('click', () => editSub(item.id));
           div.querySelector('.btn-del').addEventListener('click', () => deleteSub(item.id));
           div.querySelector('.btn-copy').addEventListener('click', () => copyText(clientUrl));
+          div.querySelector('.btn-copy-tun').addEventListener('click', () => copyText(tunUrl));
+          div.querySelector('.btn-copy-notun').addEventListener('click', () => copyText(noTunUrl));
 
           container.appendChild(div);
         });

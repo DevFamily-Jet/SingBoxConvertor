@@ -274,6 +274,7 @@ vm.runInContext(content.replace('export default {', 'const handler = {'), sandbo
 sandbox.convertFromUrl(input.sourceUrl, {
     targetVersion: input.targetVersion || "1.15",
     enableTun: input.enableTun !== false,
+    enableIpv6: input.enableIpv6 === true,
     rejectRules: input.rejectRules || {}
 }).then(resp => {
     try {
@@ -293,6 +294,7 @@ sandbox.convertFromUrl(input.sourceUrl, {
             "sourceUrl": source_url,
             "targetVersion": sub_info.get("targetVersion", "1.15"),
             "enableTun": sub_info.get("enableTun", True),
+            "enableIpv6": sub_info.get("enableIpv6", False),
             "rejectRules": resolve_sub_rules(sub_info)
         })
 
@@ -424,7 +426,11 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
             if "version" in query_params:
                 sub_info["targetVersion"] = query_params["version"][0]
             if "tun" in query_params:
-                sub_info["enableTun"] = query_params["tun"][0].lower() != "false"
+                val = query_params["tun"][0].lower()
+                sub_info["enableTun"] = val not in ("false", "0", "off")
+            if "ipv6" in query_params:
+                val = query_params["ipv6"][0].lower()
+                sub_info["enableIpv6"] = val in ("true", "1", "on")
 
             config_json, temp_filepath, err = run_conversion_and_save(sub_id, sub_info)
             if config_json:
@@ -446,10 +452,13 @@ class LocalDevHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write("Missing ?url= parameter".encode("utf-8"))
                 return
+            tun_val = query_params.get("tun", ["true"])[0].lower()
+            ipv6_val = query_params.get("ipv6", ["false"])[0].lower()
             convert_info = {
                 "sourceUrl": source_url,
                 "targetVersion": query_params.get("version", ["1.15"])[0],
-                "enableTun": query_params.get("tun", ["true"])[0].lower() != "false",
+                "enableTun": tun_val not in ("false", "0", "off"),
+                "enableIpv6": ipv6_val in ("true", "1", "on"),
                 "ruleProfileId": query_params.get("profile", ["default"])[0],
                 "rejectRules": {}
             }

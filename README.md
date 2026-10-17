@@ -143,10 +143,10 @@ npx wrangler deploy
 | 路径 | 方法 | 功能描述 |
 | :--- | :--- | :--- |
 | `/` | `GET` | 访问 Web 可视化管理面板 |
-| `/sub/:id` | `GET` | 客户端订阅输出链接（如 `/sub/99`，支持动态继承规则配置） |
-| `/convert?url=<URL>` | `GET` | 单次动态转换（不写入 KV 存储） |
+| `/sub/:id` | `GET` | 客户端订阅输出链接（如 `/sub/99`，支持动态继承规则配置与 URL 参数覆盖） |
+| `/convert?url=<URL>` | `GET` | 单次动态转换 API（支持 `&tun=true/false`、`&ipv6=true/false`、`&profile=default`） |
 | `/api/list` | `GET` | 获取当前所有托管的订阅列表 |
-| `/api/create` | `POST` | 创建或绑定新订阅（支持指定 ruleProfileId） |
+| `/api/create` | `POST` | 创建或绑定新订阅（支持指定 enableTun、enableIpv6、ruleProfileIds） |
 | `/api/update` | `POST` | 更新已有订阅信息或规则 |
 | `/api/delete` | `POST` | 删除指定订阅 |
 | `/api/rule_profiles/list` | `GET` | 获取所有规则配置文件列表（含系统预置与自定义） |
@@ -154,9 +154,11 @@ npx wrangler deploy
 | `/api/rule_profiles/update` | `POST` | 更新规则配置文件（所有关联订阅自动继承刷新） |
 | `/api/rule_profiles/delete` | `POST` | 删除自定义规则配置（内置预设受保护） |
 
-### 订阅可选 URL 查询参数
+### 动态转换与订阅 URL 可选查询参数 (适用于 `/sub/:id` 与 `/convert`)
+* `?tun=true` 或 `?tun=false`（或 `1`/`0`）：强制开启或关闭 TUN 虚拟网卡入站（关闭时仅保留 mixed 混合代理端口 2080，适合不想安装 TUN 虚拟网卡或仅使用系统代理的设备）。
+* `?ipv6=true` 或 `?ipv6=false`：控制是否向 TUN 入站与 DNS 解析策略注入 IPv6 地址与优先策略（默认关闭，有效预防 IPv6 旁路泄露）。
+* `?profile=<id>`：针对 `/convert` 单次转换指定生效的规则配置文件 ID（如 `default`、`strict` 或 `none`）。
 * `?version=1.15`（默认）：输出 Sing-box 1.15+ 现代标准规范。
-* `?tun=false`：关闭默认包含的 TUN 虚拟网卡入站（仅保留 mixed 局域网共享代理端口 2080）。
 
 ---
 
